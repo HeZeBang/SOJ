@@ -349,6 +349,7 @@ Common commands:
 | `submit <problem_id>` | `sub` | Submit and run the judge workflow |
 | `list [page]` | `ls` | List your submissions |
 | `status <submit_id>` | `st` | Show one submission in detail |
+| `describe [problem_id]` | `desc` | With no arg: list all problem IDs. With one: show id, text, and required submits |
 | `my` | | Your best scores per problem |
 | `rank` | `rk` | Leaderboard |
 | `token` | | Token cookie for the HTTP API |
