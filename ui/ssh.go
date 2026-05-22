@@ -426,13 +426,12 @@ func (sh *SSHHandler) mkTable(uf types.Userface, cols []string, colc []aurora.Co
 		ColLongest[i] = len(col)
 	}
 
-	for i, col := range data {
-		for j, cell := range col {
-			if j < len(ColLongest) {
-				ColLongest[j] = max(ColLongest[j], len(cell))
+	for i, colStr := range data {
+		for _, cell := range colStr {
+			if i < len(ColLongest) {
+				ColLongest[i] = max(ColLongest[i], len(cell))
 			}
 		}
-		_ = i
 	}
 
 	for i, col := range cols {
@@ -440,10 +439,18 @@ func (sh *SSHHandler) mkTable(uf types.Userface, cols []string, colc []aurora.Co
 	}
 	uf.Println()
 
-	for _, row := range data {
-		for i, cell := range row {
-			if i < len(ColLongest) {
-				uf.Printf("%-*s ", ColLongest[i], cell)
+	numRows := 0
+	if len(data) > 0 {
+		numRows = len(data[0])
+	}
+	for i := 0; i < numRows; i++ {
+		for j, col := range data {
+			if j < len(ColLongest) {
+				var cell string
+				if i < len(col) {
+					cell = col[i]
+				}
+				uf.Printf("%-*s ", ColLongest[j], cell)
 			}
 		}
 		uf.Println()
