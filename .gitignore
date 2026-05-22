@@ -8,6 +8,7 @@ workflows
 config.yaml
 
 SOJ
+soj
 
 *.log
 soj.db

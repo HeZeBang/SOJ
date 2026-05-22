@@ -5,27 +5,44 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/mrhaoxx/SOJ/types"
 	"github.com/rs/zerolog/log"
 )
 
-type ApptainerService struct{}
+const emptyMaskDir = "/var/lib/soj/empty-mask"
 
-func NewApptainerService() *ApptainerService {
-	return &ApptainerService{}
+type ApptainerService struct {
+	mu       sync.Mutex
+	workdirs map[string]string // instanceID -> workdir inside container
 }
 
-func (s *ApptainerService) RunImage(name string, user string, hostname string, image string, workdir string, mounts []types.Mount, mask bool, ReadonlyRootfs bool, networkdisabled bool, timeout int, networkhosted bool, env []string) (ok bool, id string) {
-	// Construction of apptainer instance start
+func NewApptainerService() *ApptainerService {
+	// Pre-create an empty directory used as the bind source when masking container dirs.
+	// 0555 prevents the container from writing to it even if the bind were rw.
+	if err := os.MkdirAll(emptyMaskDir, 0555); err != nil {
+		log.Err(err).Str("path", emptyMaskDir).Msg("failed to create empty mask dir")
+	}
+	return &ApptainerService{workdirs: make(map[string]string)}
+}
+
+func (s *ApptainerService) RunImage(name string, user string, hostname string, image string, workdir string, mounts []types.Mount, maskFiles []string, maskDirs []string, ReadonlyRootfs bool, networkdisabled bool, timeout int, networkhosted bool, env []string) (ok bool, id string) {
 	args := []string{"instance", "start"}
 
-	if mask {
-		args = append(args, "--no-mount", "sys,proc")
+	// Mask sensitive paths by bind-mounting harmless sources over them.
+	// Files: /dev/null overlays the path with a character device.
+	// Dirs: an empty host directory overlays the path, hiding everything inside.
+	for _, f := range maskFiles {
+		args = append(args, "--bind", "/dev/null:"+f+":ro")
 	}
-	
+	for _, d := range maskDirs {
+		args = append(args, "--bind", emptyMaskDir+":"+d+":ro")
+	}
+
 	args = append(args, "--containall")
 
 	if !ReadonlyRootfs {
@@ -35,17 +52,13 @@ func (s *ApptainerService) RunImage(name string, user string, hostname string, i
 
 	if networkdisabled {
 		args = append(args, "--net", "--network=none")
-	} else if networkhosted {
-		// Apptainer host network is default without --net, but with --containall it might disable net, we can omit --net
 	}
 
 	if hostname != "" {
 		args = append(args, "--hostname", hostname)
 	}
 
-	if workdir != "" {
-		args = append(args, "--pwd", workdir)
-	}
+	// --pwd is not supported by instance start; workdir is passed at exec time instead.
 
 	for _, m := range mounts {
 		bind := fmt.Sprintf("%s:%s", m.Source, m.Target)
@@ -61,14 +74,6 @@ func (s *ApptainerService) RunImage(name string, user string, hostname string, i
 
 	args = append(args, image, name)
 
-	// we use systemd-run --scope to constrain the entire instance?
-	// if we do `systemd-run --scope --unit=soj-instance-id apptainer instance start ...`, systemd-run will exit when `apptainer instance start` completes!
-	// Yes, `apptainer instance start` forks the daemon. Does it escape the systemd cgroup? 
-	// Wait, systemd-run --scope with `RemainAfterExit=yes` is not valid for scope. But the background process is in the same cgroup scope. Wait, systemd might kill remaining processes when the scope main PID exits. 
-	// Actually we should just run `apptainer exec` for EACH ExecContainer under `systemd-run`. This is much simpler and exactly maps to Systemd Cgroups (CPU, Memory limits apply per command exactly as Docker container). But what if state needs to be preserved?
-	// State is preserved in /work anyway. Background daemon processes are rare in simple judges. 
-	// Wait, if it's an instance, user runs `apptainer exec instance://...`.
-	
 	cmd := exec.Command("apptainer", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -76,11 +81,19 @@ func (s *ApptainerService) RunImage(name string, user string, hostname string, i
 		return false, ""
 	}
 
+	s.mu.Lock()
+	s.workdirs[name] = workdir
+	s.mu.Unlock()
+
 	log.Debug().Str("name", name).Msg("apptainer instance started")
 	return true, name
 }
 
 func (s *ApptainerService) CleanContainer(id string) {
+	s.mu.Lock()
+	delete(s.workdirs, id)
+	s.mu.Unlock()
+
 	cmd := exec.Command("apptainer", "instance", "stop", id)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -93,16 +106,23 @@ func (s *ApptainerService) ExecContainer(id string, cmdStr string, timeout int, 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	// Use systemd-run to launch apptainer exec instance://id.
-	// ProtectSystem/ProtectHome are service-unit-only options and are silently
-	// ignored for scope units, so they are intentionally omitted here.
+	s.mu.Lock()
+	workdir := s.workdirs[id]
+	s.mu.Unlock()
+
+	// Scope units only accept cgroup/timeout properties; sandboxing options like
+	// LimitMEMLOCK, NoNewPrivileges, ProtectSystem are service-unit-only and are
+	// rejected here. Apptainer rootless mode already applies PR_SET_NO_NEW_PRIVS
+	// via user namespaces; the container also runs as non-root SubmitUid.
 	runArgs := []string{
 		"--scope",
 		"--quiet",
 		fmt.Sprintf("--property=RuntimeMaxSec=%d", timeout),
-		"--property=LimitMEMLOCK=0",
-		"--property=NoNewPrivileges=yes",
 		"apptainer", "exec",
+	}
+
+	if workdir != "" {
+		runArgs = append(runArgs, "--pwd", workdir)
 	}
 
 	for _, e := range env {
@@ -115,12 +135,11 @@ func (s *ApptainerService) ExecContainer(id string, cmdStr string, timeout int, 
 
 	var outBuf bytes.Buffer
 	var errBuf bytes.Buffer
-	
+
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}
 
-	// We can use io.MultiWriter if stdout/stderr are provided
 	if stdout != nil {
 		cmd.Stdout = io.MultiWriter(stdout, &outBuf)
 	} else {
@@ -145,14 +164,10 @@ func (s *ApptainerService) ExecContainer(id string, cmdStr string, timeout int, 
 		exitCode = 0
 	}
 
-	// combine logs for return
-	logs := outBuf.String() + "\n" + errBuf.String()
-
-	return exitCode, logs, err
+	return exitCode, outBuf.String() + "\n" + errBuf.String(), nil
 }
 
 func (s *ApptainerService) GetContainerLogs(id string) (string, error) {
-	// Apptainer instances don't have built-in log fetcher like docker logs, unless we redirect stdout/stderr inside the instance.
-	// For judge evaluator logic, we just return empty or whatever since output is collected during ExecContainer.
-	return "Logs are collected step-by-step for apptainer", nil
+	// Apptainer instances don't have built-in log collector; output is captured per-step in ExecContainer.
+	return "", nil
 }

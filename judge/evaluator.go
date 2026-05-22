@@ -29,7 +29,7 @@ type Evaluator struct {
 
 // SandboxInterface 沙箱接口
 type SandboxInterface interface {
-	RunImage(name string, user string, hostname string, image string, workdir string, mounts []types.Mount, mask bool, ReadonlyRootfs bool, networkdisabled bool, timeout int, networkhosted bool, env []string) (ok bool, id string)
+	RunImage(name string, user string, hostname string, image string, workdir string, mounts []types.Mount, maskFiles []string, maskDirs []string, ReadonlyRootfs bool, networkdisabled bool, timeout int, networkhosted bool, env []string) (ok bool, id string)
 	CleanContainer(id string)
 	ExecContainer(id string, cmd string, timeout int, stdin io.Reader, stdout, stderr io.Writer, env []string, privileged bool) (int, string, error)
 	GetContainerLogs(id string) (string, error)
@@ -219,7 +219,22 @@ workdir_created:
 			usr = "0"
 		}
 
-		ok, cid := e.sandbox.RunImage("soj-judge-"+ctx.ID+"-"+strconv.Itoa(idx+1), usr, "soj-judgement", workflow.Image, "/work", _mount, true, true, workflow.DisableNetwork, workflow.Timeout, workflow.NetworkHostMode, envs)
+		// Resolve mask paths: workflow overrides global defaults; if workflow.Mask is false, no masking.
+		var maskFiles, maskDirs []string
+		if workflow.Mask {
+			if workflow.MaskFiles != nil {
+				maskFiles = workflow.MaskFiles
+			} else {
+				maskFiles = e.cfg.DefaultMaskFiles
+			}
+			if workflow.MaskDirs != nil {
+				maskDirs = workflow.MaskDirs
+			} else {
+				maskDirs = e.cfg.DefaultMaskDirs
+			}
+		}
+
+		ok, cid := e.sandbox.RunImage("soj-judge-"+ctx.ID+"-"+strconv.Itoa(idx+1), usr, "soj-judgement", workflow.Image, "/work", _mount, maskFiles, maskDirs, true, workflow.DisableNetwork, workflow.Timeout, workflow.NetworkHostMode, envs)
 
 		if !ok {
 			ctx.SetStatus("failed").SetMsg("failed to run judge container")

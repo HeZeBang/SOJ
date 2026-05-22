@@ -51,14 +51,14 @@ func main() {
 			Score:   100,
 			Msg:     "Correct",
 		})
-		os.WriteFile("/work/result.json", byes, 0644)
+		os.WriteFile("/result/result.json", byes, 0644)
 	} else {
 		byes, _ := json.Marshal(JudgeResult{
 			Success: true,
 			Score:   23.3,
 			Msg:     "Incorrect",
 		})
-		os.WriteFile("/work/result.json", byes, 0644)
+		os.WriteFile("/result/result.json", byes, 0644)
 	}
 
 }

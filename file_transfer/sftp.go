@@ -41,13 +41,13 @@ func SftpHandler(sess ssh.Session, cfg *types.Config, sandboxService *ApptainerS
 
 	os.Chown(path, cfg.SubmitUid, cfg.SubmitGid)
 
-	success, id := sandboxService.RunImage(name, strconv.Itoa(cfg.SubmitUid), "soj-sftpd", "docker.io/mrhaoxx/soj-subsystem-sftp", "/", []types.Mount{
+	success, id := sandboxService.RunImage(name, strconv.Itoa(cfg.SubmitUid), "soj-sftpd", cfg.SftpImage, "/", []types.Mount{
 		{
 			Type:   "bind",
 			Source: path,
 			Target: "/work",
 		},
-	}, true, true, false, 120, false, nil)
+	}, cfg.DefaultMaskFiles, cfg.DefaultMaskDirs, true, false, 120, false, nil)
 
 	if !success {
 		log.Println(name, "failed to run sftp container")

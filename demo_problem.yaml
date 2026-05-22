@@ -1,0 +1,34 @@
+version: 1
+id: hello
+text: "Submit answer.txt containing the number 42"
+submits:
+  - path: answer.txt
+    isdir: false
+workflow:
+  - image: /tmp/debian.sif
+    steps:
+      - >-
+        ans=$(cat /submits/answer.txt | tr -d '[:space:]');
+        if [ "$ans" = "42" ]; then
+          printf '{"success":true,"score":100,"message":"Correct! Got %s"}' "$ans" > /result/result.json;
+        else
+          printf '{"success":true,"score":0,"message":"Wrong answer: got %s"}' "$ans" > /result/result.json;
+        fi
+    timeout: 15
+    disablenetwork: true
+    show: [1]
+
+    # === mask 用法演示（三选一）===
+    #
+    # 用法 A：开启 mask，使用 config.yaml 的 DefaultMaskFiles/Dirs
+    mask: true
+    #
+    # 用法 B：开启 mask 并覆盖默认列表（只屏蔽你列出的路径）
+    # mask: true
+    # maskfiles:
+    #   - /proc/cmdline
+    # maskdirs:
+    #   - /proc/sys
+    #
+    # 用法 C：完全不 mask（默认，省略 mask 字段即可）
+    # mask: false

@@ -30,6 +30,10 @@ type Config struct {
 
 	DockerCli        string `yaml:"DockerCli"`
 	ProblemURLPrefix string `yaml:"ProblemURLPrefix"`
+	SftpImage        string `yaml:"SftpImage"`
+
+	DefaultMaskFiles []string `yaml:"DefaultMaskFiles"`
+	DefaultMaskDirs  []string `yaml:"DefaultMaskDirs"`
 
 	SubmitGid int `yaml:"SubmitGid"`
 	SubmitUid int `yaml:"SubmitUid"`
@@ -154,6 +158,11 @@ type Workflow struct {
 	PrivilegedSteps []int    `yaml:"privilegedsteps"`
 	NetworkHostMode bool     `yaml:"networkhostmode"`
 	Mounts          []Mount  `yaml:"mounts"`
+
+	// Mask 开关：true 时启用路径屏蔽。MaskFiles/MaskDirs 若非空则覆盖 Config 中的默认值。
+	Mask      bool     `yaml:"mask"`
+	MaskFiles []string `yaml:"maskfiles"`
+	MaskDirs  []string `yaml:"maskdirs"`
 }
 
 // Mount 挂载定义
