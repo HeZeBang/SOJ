@@ -56,6 +56,7 @@ func (sh *SSHHandler) HandleSession(s ssh.Session) {
 		uf.Println("Use 'submit", aurora.Gray(15, "(sub)"), "<problem_id>' to submit a problem")
 		uf.Println("Use 'list", aurora.Gray(15, "(ls)"), "[page]' to list your submissions")
 		uf.Println("Use 'status", aurora.Gray(15, "(st)"), "<submit_id>' to show a submission", aurora.Magenta("(fuzzy match)"))
+		uf.Println("Use 'describe", aurora.Gray(15, "(desc)"), "[problem_id]' to list problems or show one in detail")
 		uf.Println("Use 'rank", aurora.Gray(15, "(rk)"), "' to show rank list")
 		uf.Println("Use 'my' to show your submission summary")
 		uf.Println("Use 'token' to get token for frontend authentication")
@@ -76,6 +77,9 @@ func (sh *SSHHandler) HandleSession(s ssh.Session) {
 
 		case "status", "st":
 			sh.handleStatus(s, uf, cmds)
+
+		case "describe", "desc":
+			sh.handleDescribe(uf, cmds)
 
 		case "my":
 			sh.handleMy(s, uf)
@@ -215,6 +219,59 @@ func (sh *SSHHandler) handleStatus(s ssh.Session, uf types.Userface, cmds []stri
 	uf.Println()
 
 	sh.showSub(uf, *submit)
+}
+
+// handleDescribe 处理题目描述命令
+func (sh *SSHHandler) handleDescribe(uf types.Userface, cmds []string) {
+	if len(cmds) > 2 {
+		uf.Println(aurora.Red("error:"), "invalid arguments")
+		uf.Println("usage: describe [problem_id]")
+		return
+	}
+
+	if len(cmds) == 1 {
+		var ids []string
+		for k := range sh.problems {
+			ids = append(ids, k)
+		}
+		sort.Strings(ids)
+
+		if len(ids) == 0 {
+			uf.Println(aurora.Gray(15, "No problems available"))
+			return
+		}
+
+		uf.Println(aurora.Green("Available problems:"), aurora.Gray(15, fmt.Sprintf("(%d)", len(ids))))
+		for _, id := range ids {
+			uf.Println("  *", aurora.Bold(id))
+		}
+		return
+	}
+
+	pid := cmds[1]
+	pb, ok := sh.problems[pid]
+	if !ok {
+		uf.Println(aurora.Red("error:"), "problem", aurora.Yellow(strconv.Quote(pid)), "not found")
+		return
+	}
+
+	uf.Println("Problem:", aurora.Bold(aurora.BrightWhite(pb.Id)))
+	uf.Println()
+	uf.Println(aurora.Green("Description:"))
+	uf.Println(pb.Text)
+	uf.Println()
+	uf.Println(aurora.Green("Required submits:"))
+	if len(pb.Submits) == 0 {
+		uf.Println("  ", aurora.Gray(15, "(none)"))
+		return
+	}
+	for _, sub := range pb.Submits {
+		kind := "file"
+		if sub.IsDir {
+			kind = "directory"
+		}
+		uf.Println("  *", aurora.Yellow(sub.Path), aurora.Gray(15, "("+kind+")"))
+	}
 }
 
 // handleMy 处理个人信息命令
