@@ -47,11 +47,8 @@ func main() {
 		log.Warn().Msg("no allowed ssh pubkey specified, allowing all")
 	}
 
-	// 创建Docker服务
-	dockerService, err := file_transfer.NewDockerService()
-	if err != nil {
-		log.Fatal().Err(err).Msg("failed to create docker client")
-	}
+	// 创建Apptainer服务
+	sandboxService := file_transfer.NewApptainerService()
 
 	// 解析主机密钥
 	pk, err := gossh.ParsePrivateKey([]byte(cfg.HostKey))
@@ -76,7 +73,7 @@ func main() {
 	}
 
 	// 初始化评测器
-	evaluator := judge.NewEvaluator(&cfg, dockerService, dbService)
+	evaluator := judge.NewEvaluator(&cfg, sandboxService, dbService)
 
 	// 初始化HTTP服务器
 	httpServer := ui.NewHTTPServer(dbService)
@@ -99,7 +96,7 @@ func main() {
 		},
 		SubsystemHandlers: map[string]ssh.SubsystemHandler{
 			"sftp": func(sess ssh.Session) {
-				file_transfer.SftpHandler(sess, &cfg, dockerService)
+				file_transfer.SftpHandler(sess, &cfg, sandboxService)
 			},
 		},
 		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {

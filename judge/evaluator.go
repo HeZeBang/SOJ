@@ -18,29 +18,28 @@ import (
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/rs/zerolog/log"
 
-	"github.com/docker/docker/api/types/mount"
 )
 
 // Evaluator 评测器
 type Evaluator struct {
 	cfg       *types.Config
-	docker    DockerInterface
+	sandbox   SandboxInterface
 	dbService *types.DatabaseService
 }
 
-// DockerInterface Docker接口
-type DockerInterface interface {
-	RunImage(name string, user string, hostname string, image string, workdir string, mounts []mount.Mount, mask bool, ReadonlyRootfs bool, networkdisabled bool, timeout int, networkhosted bool, env []string) (ok bool, id string)
+// SandboxInterface 沙箱接口
+type SandboxInterface interface {
+	RunImage(name string, user string, hostname string, image string, workdir string, mounts []types.Mount, mask bool, ReadonlyRootfs bool, networkdisabled bool, timeout int, networkhosted bool, env []string) (ok bool, id string)
 	CleanContainer(id string)
-	ExecContainer(id string, cmd string, timeout int, stdout, stderr io.Writer, env []string, privileged bool) (int, string, error)
+	ExecContainer(id string, cmd string, timeout int, stdin io.Reader, stdout, stderr io.Writer, env []string, privileged bool) (int, string, error)
 	GetContainerLogs(id string) (string, error)
 }
 
 // NewEvaluator 创建新的评测器
-func NewEvaluator(cfg *types.Config, docker DockerInterface, dbService *types.DatabaseService) *Evaluator {
+func NewEvaluator(cfg *types.Config, sandbox SandboxInterface, dbService *types.DatabaseService) *Evaluator {
 	return &Evaluator{
 		cfg:       cfg,
-		docker:    docker,
+		sandbox:   sandbox,
 		dbService: dbService,
 	}
 }
@@ -66,9 +65,11 @@ func (e *Evaluator) RunJudge(ctx *types.SubmitCtx, problem *types.Problem) {
 
 	var submits_dir = path.Join(ctx.Workdir, "submits")
 	var workflow_dir = path.Join(ctx.Workdir, "work")
+	var result_dir = path.Join(ctx.Workdir, "result")
 
 	var rsubmits_dir = path.Join(ctx.RealWorkdir, "submits")
 	var rworkflow_dir = path.Join(ctx.RealWorkdir, "work")
+	var rresult_dir = path.Join(ctx.RealWorkdir, "result")
 
 	err = os.Mkdir(ctx.Workdir, 0700)
 	if err != nil {
@@ -82,6 +83,10 @@ func (e *Evaluator) RunJudge(ctx *types.SubmitCtx, problem *types.Problem) {
 	if err != nil {
 		goto workdir_creation_failed
 	}
+	err = os.Mkdir(result_dir, 0700)
+	if err != nil {
+		goto workdir_creation_failed
+	}
 	err = os.Chown(ctx.Workdir, e.cfg.SubmitUid, e.cfg.SubmitGid)
 	if err != nil {
 		goto workdir_creation_failed
@@ -91,6 +96,10 @@ func (e *Evaluator) RunJudge(ctx *types.SubmitCtx, problem *types.Problem) {
 		goto workdir_creation_failed
 	}
 	err = os.Chown(workflow_dir, e.cfg.SubmitUid, e.cfg.SubmitGid)
+	if err != nil {
+		goto workdir_creation_failed
+	}
+	err = os.Chown(result_dir, e.cfg.SubmitUid, e.cfg.SubmitGid)
 	if err != nil {
 		goto workdir_creation_failed
 	}
@@ -150,25 +159,32 @@ workdir_created:
 	e.dbService.UpdateSubmit(ctx)
 
 	for idx, workflow := range problem.Workflow {
-		var _mount = []mount.Mount{
+		var _mount = []types.Mount{
 			{
-				Type:     mount.TypeBind,
+				Type:     "bind",
 				Source:   submits_dir,
 				Target:   "/submits",
 				ReadOnly: true,
 			},
 			{
-				Type:   mount.TypeBind,
+				Type:   "bind",
 				Source: workflow_dir,
 				Target: "/work",
+			},
+			{
+				Type:   "bind",
+				Source: result_dir,
+				Target: "/result",
 			},
 		}
 
 		var envs = []string{
 			"SOJ_SUBMITS_DIR=/submits",
 			"SOJ_WORK_DIR=/work",
+			"SOJ_RESULT_DIR=/result",
 			"SOJ_REAL_WORKDIR=" + rworkflow_dir,
 			"SOJ_REAL_SUBMITDIR=" + rsubmits_dir,
+			"SOJ_REAL_RESULTDIR=" + rresult_dir,
 			"SOJ_PROBLEM=" + ctx.Problem,
 			"SOJ_SUBMIT=" + ctx.ID,
 			"SOJ_WORK_UID=" + strconv.Itoa(e.cfg.SubmitUid),
@@ -176,8 +192,8 @@ workdir_created:
 		}
 
 		for _, mnt := range workflow.Mounts {
-			_mount = append(_mount, mount.Mount{
-				Type:     mount.Type(mnt.Type),
+			_mount = append(_mount, types.Mount{
+				Type:     mnt.Type,
 				Source:   mnt.Source,
 				Target:   mnt.Target,
 				ReadOnly: mnt.ReadOnly,
@@ -203,7 +219,7 @@ workdir_created:
 			usr = "0"
 		}
 
-		ok, cid := e.docker.RunImage("soj-judge-"+ctx.ID+"-"+strconv.Itoa(idx+1), usr, "soj-judgement", workflow.Image, "/work", _mount, false, false, workflow.DisableNetwork, workflow.Timeout, workflow.NetworkHostMode, envs)
+		ok, cid := e.sandbox.RunImage("soj-judge-"+ctx.ID+"-"+strconv.Itoa(idx+1), usr, "soj-judgement", workflow.Image, "/work", _mount, true, true, workflow.DisableNetwork, workflow.Timeout, workflow.NetworkHostMode, envs)
 
 		if !ok {
 			ctx.SetStatus("failed").SetMsg("failed to run judge container")
@@ -211,7 +227,7 @@ workdir_created:
 			return
 		}
 
-		defer e.docker.CleanContainer(cid)
+		defer e.sandbox.CleanContainer(cid)
 
 		steps := make([]types.WorkflowStepResult, len(workflow.Steps))
 
@@ -231,7 +247,7 @@ workdir_created:
 				rr = &ColoredIO{ctx.Userface, aurora.BlueFg}
 				re = &ColoredIO{ctx.Userface, aurora.RedFg}
 			}
-			ec, logs, err := e.docker.ExecContainer(cid, step, workflow.Timeout, rr, re, envs, priv)
+			ec, logs, err := e.sandbox.ExecContainer(cid, step, workflow.Timeout, nil, rr, re, envs, priv)
 
 			if ok {
 				ctx.Userface.Println(aurora.Gray(15, "exit code:"), aurora.Yellow(ec))
@@ -254,7 +270,7 @@ workdir_created:
 			log.Debug().Timestamp().Str("id", ctx.ID).Str("image", workflow.Image).Str("step", step).Int("timeout", workflow.Timeout).Str("logs", logs).Int("exitcode", ec).Msg("ran judge step")
 		}
 
-		logs, err := e.docker.GetContainerLogs(cid)
+		logs, err := e.sandbox.GetContainerLogs(cid)
 		if err != nil {
 			ctx.SetStatus("failed").SetMsg("failed to get judge logs")
 			e.dbService.UpdateSubmit(ctx)
@@ -273,7 +289,7 @@ workdir_created:
 	ctx.SetStatus("collect_result")
 	e.dbService.UpdateSubmit(ctx)
 
-	var result_file = workflow_dir + "/result.json"
+	var result_file = result_dir + "/result.json"
 
 	_result, err := os.ReadFile(result_file)
 

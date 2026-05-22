@@ -10,13 +10,41 @@ import (
 	"github.com/mrhaoxx/sftp"
 )
 
-func main() {
+type structRW struct {
+	io.Reader
+	io.Writer
+}
 
+func (s *structRW) Close() error {
+	return nil
+}
+
+func main() {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println("recovered from panic", r)
 		}
 	}()
+
+	if len(os.Args) > 1 && os.Args[1] == "stdio" {
+		serverOptions := []sftp.ServerOption{
+			sftp.WithDebug(os.Stderr),
+			sftp.WithServerWorkingDirectory("/work"),
+		}
+		
+		rw := &structRW{os.Stdin, os.Stdout}
+		server, err := sftp.NewServer(rw, serverOptions...)
+		if err != nil {
+			log.Fatalf("sftp server init error: %s\n", err)
+		}
+		if err := server.Serve(); err == io.EOF {
+			server.Close()
+			os.Exit(0)
+		} else if err != nil {
+			log.Fatalf("sftp server completed with error: %v", err)
+		}
+		os.Exit(0)
+	}
 
 	lc, err := net.ListenTCP("tcp", net.TCPAddrFromAddrPort(netip.MustParseAddrPort("0.0.0.0:2207")))
 	if err != nil {
@@ -30,15 +58,11 @@ func main() {
 		log.Fatalf("failed to accept connection")
 	}
 
-	// debugStream := io.Discard
 	serverOptions := []sftp.ServerOption{
-		sftp.WithDebug(os.Stdout),
+		//sftp.WithDebug(os.Stdout),
 		sftp.WithServerWorkingDirectory("/work"),
 	}
-	server, err := sftp.NewServer(
-		conn,
-		serverOptions...,
-	)
+	server, err := sftp.NewServer(conn, serverOptions...)
 	if err != nil {
 		log.Printf("sftp server init error: %s\n", err)
 		return

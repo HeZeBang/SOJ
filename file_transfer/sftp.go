@@ -1,22 +1,35 @@
 package file_transfer
 
 import (
-	"io"
 	"log"
-	"net"
-	"net/netip"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types/mount"
 	ssh "github.com/gliderlabs/ssh"
 	"github.com/mrhaoxx/SOJ/types"
 )
 
+// isValidUsername rejects usernames that could inject arguments into apptainer commands.
+func isValidUsername(u string) bool {
+	if len(u) == 0 || len(u) > 64 {
+		return false
+	}
+	for _, c := range u {
+		if !('a' <= c && c <= 'z') && !('A' <= c && c <= 'Z') &&
+			!('0' <= c && c <= '9') && c != '-' && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
 // SftpHandler handler for SFTP subsystem
-func SftpHandler(sess ssh.Session, cfg *types.Config, dockerService *DockerService) {
+func SftpHandler(sess ssh.Session, cfg *types.Config, sandboxService *ApptainerService) {
+	if !isValidUsername(sess.User()) {
+		log.Println("rejected sftp session: invalid username", sess.User())
+		return
+	}
 	name := "soj-subsystem-sftp-" + sess.User() + "-" + time.Now().Format("20060102150405")
 	path := cfg.SubmitsDir + "/" + sess.User()
 	log.Println("new sftp session", sess.User(), name, path)
@@ -28,9 +41,9 @@ func SftpHandler(sess ssh.Session, cfg *types.Config, dockerService *DockerServi
 
 	os.Chown(path, cfg.SubmitUid, cfg.SubmitGid)
 
-	success, id := dockerService.RunImage(name, strconv.Itoa(cfg.SubmitUid), "soj-sftpd", "docker.io/mrhaoxx/soj-subsystem-sftp", "/", []mount.Mount{
+	success, id := sandboxService.RunImage(name, strconv.Itoa(cfg.SubmitUid), "soj-sftpd", "docker.io/mrhaoxx/soj-subsystem-sftp", "/", []types.Mount{
 		{
-			Type:   mount.TypeBind,
+			Type:   "bind",
 			Source: path,
 			Target: "/work",
 		},
@@ -40,39 +53,16 @@ func SftpHandler(sess ssh.Session, cfg *types.Config, dockerService *DockerServi
 		log.Println(name, "failed to run sftp container")
 		return
 	}
-	// defer dockerService.CleanContainer(id)
+	defer sandboxService.CleanContainer(id)
 
-	// time.Sleep(500 * time.Millisecond)
+	log.Println(name, "running sftp stdio proxy to container", id)
 
-	ip := dockerService.GetContainerIP(id)
-
-	log.Printf("ip: %s, %s", ip, "try to connect to container")
-
-	conn, err := net.DialTCP("tcp", nil, net.TCPAddrFromAddrPort(netip.MustParseAddrPort(ip+":2207")))
+	_, _, err := sandboxService.ExecContainer(id, "/soj-sftp stdio", 3600, sess, sess, os.Stderr, nil, false)
 	if err != nil {
-		log.Println(name, "failed to connect to container", id, err)
+		log.Println(name, "failed to run stdio server in container", id, err)
 		return
 	}
-
-	log.Println(name, "connected to container", id)
-
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-
-	go func() {
-		io.Copy(conn, sess)
-		conn.CloseWrite()
-		// log.Println(name, "session up closed", id)
-		wg.Done()
-	}()
-
-	go func() {
-		io.Copy(sess, conn)
-		sess.CloseWrite()
-		wg.Done()
-	}()
-
-	wg.Wait()
+	log.Println(name, "sftp session completed", id)
 
 	log.Println(name, "session closed", id)
 }
