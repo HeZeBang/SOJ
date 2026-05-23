@@ -165,6 +165,14 @@ type Problem struct {
 	Submits  []Submit   `yaml:"submits"`
 	Workflow []Workflow `yaml:"workflow"`
 
+	// RankUpdate 控制排行榜在新提交完成时如何写入 User.BestSubmits / BestScores。
+	// 取值（大小写不敏感）：
+	//   ""、"best" —— 默认。仅当 newScore > oldBest 时才覆盖（按最高分排名）。
+	//   "always"、"latest" —— 强制覆盖：只要新提交比当前记录的 BestSubmitDate 更晚，
+	//                          就用它替换最佳成绩（按最新一次成功提交排名）。
+	// 任何无法识别的值都退回到 "best" 语义。失败 / 未完成的提交始终不会写入。
+	RankUpdate string `yaml:"rankupdate,omitempty"`
+
 	// Package: import-time only metadata, ignored by the runtime evaluator.
 	Package *PackageSpec `yaml:"package,omitempty"`
 }

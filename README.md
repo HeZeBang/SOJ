@@ -399,6 +399,7 @@ version: 1
 id: <string>
 text: <description shown to users>
 weight: 1.0                 # score multiplier; defaults to 1.0
+rankupdate: ""              # rank list update rule; see below
 submits:
   - path: <relative path under SubmitsDir/<user>/<problem>/>
     isdir: false            # set true to walk a directory tree
@@ -452,6 +453,39 @@ The final step (in the last workflow) must leave a `result.json` in `/result/`:
 The `tag` field is an optional string displayed alongside the score in the
 rank table and other views (e.g. `90.00 (6.00x)`). Empty or omitted means no
 tag is shown.
+
+#### Rank list update rule (`rankupdate`)
+
+Controls how `User.BestScores / BestSubmits / BestSubmitDate / BestTags` are
+written when a submission for this problem finishes. Case-insensitive.
+
+| Value | Behaviour |
+|---|---|
+| `""` *(default)*, `best` | Update only if `newScore > oldBest`. Classic "best-of" semantics — once a user gets a high score, weaker later submissions can't lower it. |
+| `always`, `latest` | Update whenever the new submission is more recent than `BestSubmitDate`. Use this when the *latest* submission is what should appear on the leaderboard regardless of score (e.g. a survey-style problem where students iterate, or a course where the final submission is the one being graded). |
+
+Failed / non-`completed` submissions never write to the rank record, even
+under `always` — so a successful run cannot be wiped by a later failure.
+
+The comparison in `always` mode uses `BestSubmitDate ≤ SubmitTime`, so re-running
+`DoFullUserScan` (full rescan) is order-independent and idempotent — the
+latest successful submission always wins.
+
+Examples:
+
+```yaml
+# Classic problem: keep the student's best run.
+id: hello
+weight: 1.0
+# rankupdate omitted → defaults to "best"
+```
+
+```yaml
+# Final-submission grading: whatever they last submitted is the grade.
+id: proj-final
+weight: 1.0
+rankupdate: always
+```
 
 Environment variables available in every step:
 

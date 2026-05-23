@@ -18,6 +18,23 @@ import (
 
 const emptyMaskDir = "/var/lib/soj/empty-mask"
 
+// pathExistsInImage checks whether a path exists inside a SIF image by running
+// a quick apptainer exec test. Returns true if the path is present, false otherwise.
+// Errors (e.g. missing apptainer) are logged and treated as "exists" to be safe.
+func pathExistsInImage(image, path string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "apptainer", "exec", "--containall", image, "test", "-e", path)
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			log.Warn().Str("image", image).Str("path", path).Msg("pathExistsInImage: timeout, assuming exists")
+			return true
+		}
+		return false
+	}
+	return true
+}
+
 // RunImageOpts 是 apptainer instance start 的参数集合。安全相关的开关（NoPrivs /
 // KeepPrivs / DropCaps / AddCaps / Seccomp）只能在 instance start 时一次性生效，
 // 之后所有 exec 共享同一个能力 / seccomp 信封。
@@ -44,7 +61,9 @@ type RunImageOpts struct {
 
 // ExecOpts 是 apptainer exec（在 systemd-run 范围内）的参数集合。
 // 非 Privileged 且 UID != 0 时，命令外层会包一层
-//   setpriv --reuid=UID --regid=GID --clear-groups --
+//
+//	setpriv --reuid=UID --regid=GID --clear-groups --
+//
 // 在容器内丢身份；Privileged 步骤则直接以容器 root 运行。
 type ExecOpts struct {
 	Cmd        string
@@ -80,11 +99,20 @@ func (s *ApptainerService) RunImage(opts RunImageOpts) (ok bool, id string) {
 	// Mask sensitive paths by bind-mounting harmless sources over them.
 	// Files: /dev/null overlays the path with a character device.
 	// Dirs: an empty host directory overlays the path, hiding everything inside.
+	//
+	// With --containall, /proc and /sys may not be mounted at all (e.g. busybox
+	// SFTP image), so we probe each path inside the image first and skip
+	// entries that don't exist — apptainer would fail with
+	// "destination … doesn't exist in container" otherwise.
 	for _, f := range opts.MaskFiles {
-		args = append(args, "--bind", "/dev/null:"+f+":ro")
+		if pathExistsInImage(opts.Image, f) {
+			args = append(args, "--bind", "/dev/null:"+f+":ro")
+		}
 	}
 	for _, d := range opts.MaskDirs {
-		args = append(args, "--bind", emptyMaskDir+":"+d+":ro")
+		if pathExistsInImage(opts.Image, d) {
+			args = append(args, "--bind", emptyMaskDir+":"+d+":ro")
+		}
 	}
 
 	args = append(args, "--containall")

@@ -1,6 +1,7 @@
 package types
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,6 +64,35 @@ func (ds *DatabaseService) CreateUser(userID string) (*User, error) {
 
 	log.Info().Str("user", userID).Msg("Created new user")
 	return user, nil
+}
+
+// applyRankUpdate writes the user's best record for a problem according to
+// the problem's RankUpdate rule (see types.Problem.RankUpdate). Failed or
+// not-yet-completed submits never write. The caller must have called
+// ensureMaps(u) first.
+func applyRankUpdate(u *User, problem *Problem, s *SubmitCtx) {
+	if s.Status != "completed" || !s.JudgeResult.Success {
+		return
+	}
+	problemID := s.Problem
+	newScore := s.JudgeResult.Score * problem.Weight
+
+	var shouldUpdate bool
+	switch strings.ToLower(strings.TrimSpace(problem.RankUpdate)) {
+	case "always", "latest":
+		// 用 BestSubmitDate 比较而不是无脑覆盖，避免 DoFullUserScan 时加载顺序
+		// 影响最终结果。等号让同一次提交多次扫描时也能稳定写入（幂等）。
+		shouldUpdate = u.BestSubmitDate[problemID] <= s.SubmitTime
+	default: // "", "best", 或任何无法识别的值
+		shouldUpdate = u.BestScores[problemID] < newScore
+	}
+	if !shouldUpdate {
+		return
+	}
+	u.BestScores[problemID] = newScore
+	u.BestSubmits[problemID] = s.ID
+	u.BestSubmitDate[problemID] = s.SubmitTime
+	u.BestTags[problemID] = s.JudgeResult.Tag
 }
 
 // ensureMaps lazy-initializes all JMap fields on User so old rows (where the
@@ -130,17 +160,7 @@ func (ds *DatabaseService) UpdateUserSubmitResult(userID string, submit *SubmitC
 		return err
 	}
 	ensureMaps(user)
-
-	if submit.Status == "completed" && submit.JudgeResult.Success {
-		newScore := submit.JudgeResult.Score * problem.Weight
-		if user.BestScores[submit.Problem] < newScore {
-			user.BestScores[submit.Problem] = newScore
-			user.BestSubmits[submit.Problem] = submit.ID
-			user.BestSubmitDate[submit.Problem] = submit.SubmitTime
-			user.BestTags[submit.Problem] = submit.JudgeResult.Tag
-		}
-	}
-
+	applyRankUpdate(user, problem, submit)
 	return ds.UpdateUser(user)
 }
 
@@ -164,17 +184,8 @@ func (ds *DatabaseService) DoFullUserScan(problems map[string]Problem) error {
 			log.Fatal().Msg("Encountered corrupted data, submitted user does not exist in User table")
 		}
 
-		if s.Status == "completed" && s.JudgeResult.Success {
-			problem, exists := problems[s.Problem]
-			if exists {
-				newScore := s.JudgeResult.Score * problem.Weight
-				if u.BestScores[s.Problem] < newScore {
-					u.BestScores[s.Problem] = newScore
-					u.BestSubmits[s.Problem] = s.ID
-					u.BestSubmitDate[s.Problem] = s.SubmitTime
-					u.BestTags[s.Problem] = s.JudgeResult.Tag
-				}
-			}
+		if problem, exists := problems[s.Problem]; exists {
+			applyRankUpdate(&u, &problem, &s)
 		}
 
 		userMap[s.User] = u
