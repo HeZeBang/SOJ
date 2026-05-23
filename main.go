@@ -37,16 +37,31 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to parse config file")
 	}
 
-	// 子命令分发：./SOJ import <package-dir>
-	if len(os.Args) >= 2 && os.Args[1] == "import" {
-		if len(os.Args) != 3 {
-			fmt.Fprintln(os.Stderr, "usage: SOJ import <package-dir>")
-			os.Exit(2)
+	// 子命令分发
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "import":
+			if len(os.Args) != 3 {
+				fmt.Fprintln(os.Stderr, "usage: SOJ import <package-dir>")
+				os.Exit(2)
+			}
+			if err := deploy.ImportPackage(&cfg, os.Args[2]); err != nil {
+				log.Fatal().Err(err).Msg("import failed")
+			}
+			return
+		case "rejudge":
+			opts := deploy.RejudgeOptions{}
+			if len(os.Args) == 3 {
+				opts.ProblemId = os.Args[2]
+			} else if len(os.Args) != 2 {
+				fmt.Fprintln(os.Stderr, "usage: SOJ rejudge [problem_id]")
+				os.Exit(2)
+			}
+			if err := deploy.Rejudge(&cfg, opts); err != nil {
+				log.Fatal().Err(err).Msg("rejudge failed")
+			}
+			return
 		}
-		if err := deploy.ImportPackage(&cfg, os.Args[2]); err != nil {
-			log.Fatal().Err(err).Msg("import failed")
-		}
-		return
 	}
 
 	// 解析SSH公钥
