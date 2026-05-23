@@ -132,8 +132,19 @@ HostKey: |
 ListenAddr: "0.0.0.0:2222"
 APIAddr:    "0.0.0.0:8080"
 
-# 允许登录的公钥。留空则接受任意密钥。
-AllowedSSHPubkey: "ssh-ed25519 AAAA... user@host"
+# SSH 认证 — 选择一种模式（详见下方"SSH 认证"章节）：
+#
+# 模式一：单公钥（原版行为）
+# AllowedSSHPubkey: "ssh-ed25519 AAAA... user@host"
+#
+# 模式二：GitHub 用户名列表 — 从 github.com/<user>.keys 拉取每个用户的公钥
+# Auth:
+#   Mode: github-list
+#   GitHubUsers:
+#     - "alice"
+#     - "bob"
+#   GitHubToken: "ghp_xxx"                   # 可选，避免 rate limit
+#   GitHubEndpoint: "https://github.com"     # 可选，用于 GitHub Enterprise
 
 SubmitsDir:        /data/soj/submits
 SubmitWorkDir:     /data/soj/work
@@ -241,6 +252,52 @@ ssh -p 2222 zambar@localhost submit hello
 
 ---
 
+## SSH 认证
+
+SOJ 支持两种认证模式，通过 `config.yaml` 选择。两种模式下，客户端提供的 SSH 用户名即为 SOJ 用户身份。
+
+### 模式一：单公钥 (`AllowedSSHPubkey`)
+
+原版模式。仅接受一个公钥；`AllowedSSHPubkey` 留空则接受任意密钥（无用户名验证）。
+
+```yaml
+AllowedSSHPubkey: "ssh-ed25519 AAAA... user@host"
+```
+
+适用于单用户场景或测试。**无法防止用户名伪造** — 任何持有匹配密钥的客户端可以冒充任意用户名。
+
+### 模式二：GitHub 用户名列表 (`Auth.Mode: github-list`)
+
+SOJ 在启动时从 `https://github.com/<username>.keys` 拉取每个用户的公钥。SSH 用户名**必须与 GitHub 用户名一致** — 客户端提供的密钥在拉取的集合中查找，拥有该密钥的 GitHub 用户名必须等于 `ctx.User()`。
+
+```yaml
+Auth:
+  Mode: github-list
+  GitHubUsers:
+    - "alice"
+    - "bob"
+    - "charlie"
+  GitHubToken: "ghp_xxx"                   # 可选；避免 60 请求/小时的 rate limit
+  GitHubEndpoint: "https://github.com"     # 可选；用于 GitHub Enterprise
+```
+
+**工作原理：**
+
+1. 启动时，SOJ 并发拉取所有列出用户的密钥（带进度条）。拉取失败会记录错误日志但**不会**阻止 SOJ 启动 — 失败的用户在密钥加载前无法登录。
+2. 每个密钥通过 SHA256 指纹映射到其 GitHub 用户名。
+3. SSH 连接时，查找客户端密钥的指纹。如果找到且拥有用户名与 `ctx.User()` 匹配，则认证成功。
+4. 管理员可运行 `ssh oj adm refresh-keys` 重新拉取所有密钥，无需重启 SOJ。
+
+**要求：**
+
+- SOJ 主机必须能通过 HTTPS 访问 `github.com`（或配置的端点）。
+- 用户必须在其 GitHub 账户设置中配置至少一个 SSH 公钥（`Settings → SSH and GPG keys`）。
+- 连接 SOJ 时使用的 SSH 用户名**必须与 GitHub 用户名完全一致**。
+
+**向后兼容：** 如果未配置 `Auth` 但设置了 `AllowedSSHPubkey`，SOJ 自动回退到单公钥模式。如果两者都未设置，SOJ 接受任意密钥（开放模式）并输出警告。
+
+---
+
 ## 配置参考
 
 ### 全局配置 (`config.yaml`)
@@ -249,7 +306,12 @@ ssh -p 2222 zambar@localhost submit hello
 |---|---|
 | `HostKey` | SSH 主机私钥 (PEM) |
 | `ListenAddr` / `APIAddr` | SSH 和 HTTP 监听地址 |
-| `AllowedSSHPubkey` | 允许登录的 SSH 公钥；留空 = 接受任意密钥 |
+| `AllowedSSHPubkey` | 允许登录的 SSH 公钥；留空 = 接受任意密钥。旧版字段，推荐使用 `Auth` |
+| `Auth.Mode` | 认证模式：`single`、`github-list` 或留空（自动推断） |
+| `Auth.AllowedSSHPubkey` | `Auth.Mode=single` 时使用，等价于顶层 `AllowedSSHPubkey` |
+| `Auth.GitHubUsers` | GitHub 用户名列表，启动时拉取其 SSH 公钥（`github-list` 模式） |
+| `Auth.GitHubToken` | 可选的 GitHub 个人访问令牌，提升 rate limit（60→5000 请求/小时） |
+| `Auth.GitHubEndpoint` | GitHub 基础 URL（默认 `https://github.com`）；用于 GitHub Enterprise |
 | `SubmitsDir` | 上传提交存储位置 (`<dir>/<user>/<problem>/`) |
 | `SubmitWorkDir` | 每次提交的临时工作目录（每次运行时创建和销毁） |
 | `RealSubmitsDir` / `RealSubmitWorkDir` | 作为 `SOJ_REAL_*` 环境变量暴露给容器的宿主机路径。除非 SOJ 本身在容器中运行，否则与 *Dir 字段相同 |
@@ -538,6 +600,15 @@ SOJ 运行后，`ssh -p 2222 <user>@<host>` 打开交互式会话。常用命令
 | `token` | | HTTP API 的 Token cookie |
 
 SFTP 也作为子系统暴露（`sftp -P 2222 <user>@<host>`），用户进入 SFTP 容器内的 `/work`，对应宿主机上的 `SubmitsDir/<user>`。
+
+管理员命令（前缀 `adm`）：
+
+| 命令 | 用途 |
+|---|---|
+| `adm list [page]` | 列出所有用户的所有提交 |
+| `adm status <submit_id>` | 查看任意提交详情 |
+| `adm pause` | 全局暂停提交 |
+| `adm refresh-keys` | 重新从 GitHub 拉取 SSH 密钥（仅 `github-list` 模式） |
 
 关于**终端用户视角**（提交者如何与运行中的部署交互 — 上传约定、OpenSSH 版本差异、每个命令的示例），请参见 [`GUIDE_zh.md`](./GUIDE_zh.md)。本 README 是运维指南；`GUIDE_zh.md` 是给仅需提交题目用户的指南。
 

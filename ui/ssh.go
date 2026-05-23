@@ -10,6 +10,7 @@ import (
 
 	ssh "github.com/gliderlabs/ssh"
 	"github.com/logrusorgru/aurora/v4"
+	"github.com/mrhaoxx/SOJ/auth"
 	"github.com/mrhaoxx/SOJ/types"
 )
 
@@ -19,15 +20,17 @@ type SSHHandler struct {
 	cfg       *types.Config
 	problems  map[string]types.Problem
 	paused    bool
+	authMgr   *auth.AuthManager
 }
 
 // NewSSHHandler 创建新的SSH处理器
-func NewSSHHandler(dbService *types.DatabaseService, cfg *types.Config, problems map[string]types.Problem) *SSHHandler {
+func NewSSHHandler(dbService *types.DatabaseService, cfg *types.Config, problems map[string]types.Problem, authMgr *auth.AuthManager) *SSHHandler {
 	return &SSHHandler{
 		dbService: dbService,
 		cfg:       cfg,
 		problems:  problems,
 		paused:    false,
+		authMgr:   authMgr,
 	}
 }
 
@@ -403,6 +406,17 @@ func (sh *SSHHandler) handleAdmin(s ssh.Session, uf types.Userface, cmds []strin
 	case "reload":
 		// 这个功能需要在main.go中实现
 		uf.Println("Reload functionality will be implemented in main.go")
+	case "refresh-keys":
+		if sh.authMgr == nil {
+			uf.Println(aurora.Red("error:"), "auth manager not available")
+			return
+		}
+		uf.Println("Refreshing SSH keys from GitHub...")
+		if err := sh.authMgr.Refresh(); err != nil {
+			uf.Println(aurora.Red("error:"), err)
+		} else {
+			uf.Println(aurora.Green("Keys refreshed successfully"))
+		}
 	}
 }
 

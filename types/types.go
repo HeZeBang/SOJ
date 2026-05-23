@@ -11,13 +11,24 @@ import (
 	"github.com/logrusorgru/aurora/v4"
 )
 
+// AuthConfig SSH 认证配置
+type AuthConfig struct {
+	Mode             string   `yaml:"Mode"`             // "single", "github-list". 空则自动推断
+	AllowedSSHPubkey string   `yaml:"AllowedSSHPubkey"` // Mode=single 时使用
+	GitHubUsers      []string `yaml:"GitHubUsers"`      // Mode=github-list 时使用
+	GitHubToken      string   `yaml:"GitHubToken"`      // 可选，避免 rate limit
+	GitHubEndpoint   string   `yaml:"GitHubEndpoint"`   // 可选，默认 https://github.com，支持 GitHub Enterprise
+}
+
 // Config 全局配置
 type Config struct {
 	HostKey    string `yaml:"HostKey"`
 	ListenAddr string `yaml:"ListenAddr"`
 	APIAddr    string `yaml:"APIAddr"`
 
-	AllowedSSHPubkey string `yaml:"AllowedSSHPubkey"`
+	AllowedSSHPubkey string `yaml:"AllowedSSHPubkey"` // 向后兼容，等价于 Auth.Mode=single + Auth.AllowedSSHPubkey
+
+	Auth AuthConfig `yaml:"Auth"`
 
 	SubmitsDir    string `yaml:"SubmitsDir"`
 	SubmitWorkDir string `yaml:"SubmitWorkDir"`

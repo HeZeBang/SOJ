@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/mrhaoxx/SOJ/auth"
 	"github.com/mrhaoxx/SOJ/deploy"
 	"github.com/mrhaoxx/SOJ/file_transfer"
 	"github.com/mrhaoxx/SOJ/judge"
@@ -64,16 +65,12 @@ func main() {
 		}
 	}
 
-	// 解析SSH公钥
-	var pubkey gossh.PublicKey
-	if cfg.AllowedSSHPubkey != "" {
-		pubkey, _, _, _, err = gossh.ParseAuthorizedKey([]byte(cfg.AllowedSSHPubkey))
-		if err != nil {
-			log.Fatal().Err(err).Msg("failed to parse allowed ssh pubkey")
-		}
-	} else {
-		log.Warn().Msg("no allowed ssh pubkey specified, allowing all")
+	// 初始化认证管理器
+	authMgr, err := auth.NewAuthManager(cfg.Auth, cfg.AllowedSSHPubkey)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to initialize auth")
 	}
+	log.Info().Str("mode", authMgr.GetMode()).Msg("auth initialized")
 
 	// 创建Apptainer服务
 	sandboxService := file_transfer.NewApptainerService()
@@ -108,7 +105,7 @@ func main() {
 	httpServer.ServeHTTP(cfg.APIAddr)
 
 	// 初始化SSH处理器
-	sshHandler := ui.NewSSHHandler(dbService, &cfg, problems)
+	sshHandler := ui.NewSSHHandler(dbService, &cfg, problems, authMgr)
 
 	// 设置SSH服务器
 	s := &ssh.Server{
@@ -127,9 +124,7 @@ func main() {
 				file_transfer.SftpHandler(sess, &cfg, sandboxService)
 			},
 		},
-		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
-			return pubkey == nil || ssh.KeysEqual(pubkey, key)
-		},
+		PublicKeyHandler: authMgr.PublicKeyHandler(),
 	}
 	s.AddHostKey(pk)
 

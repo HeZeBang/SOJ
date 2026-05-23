@@ -155,8 +155,19 @@ HostKey: |
 ListenAddr: "0.0.0.0:2222"
 APIAddr:    "0.0.0.0:8080"
 
-# Public key allowed to log in. If empty, any key is accepted.
-AllowedSSHPubkey: "ssh-ed25519 AAAA... user@host"
+# SSH authentication — pick one mode (see "SSH authentication" section below):
+#
+# Mode 1: Single key (original behavior)
+# AllowedSSHPubkey: "ssh-ed25519 AAAA... user@host"
+#
+# Mode 2: GitHub key list — fetch each user's keys from github.com/<user>.keys
+# Auth:
+#   Mode: github-list
+#   GitHubUsers:
+#     - "alice"
+#     - "bob"
+#   GitHubToken: "ghp_xxx"           # optional, avoids rate limit
+#   GitHubEndpoint: "https://github.com"  # optional, for GitHub Enterprise
 
 SubmitsDir:        /data/soj/submits
 SubmitWorkDir:     /data/soj/work
@@ -271,6 +282,68 @@ followed by another `submit` to see the wrong-answer path.
 
 ---
 
+## SSH authentication
+
+SOJ supports two authentication modes, selected via `config.yaml`. In both
+modes, the SSH username the client presents is used as the SOJ user identity.
+
+### Mode 1: Single key (`AllowedSSHPubkey`)
+
+The original mode. Only one public key is accepted; `AllowedSSHPubkey` left
+empty accepts any key (no username verification).
+
+```yaml
+AllowedSSHPubkey: "ssh-ed25519 AAAA... user@host"
+```
+
+This is suitable for single-user setups or testing. **There is no protection
+against username spoofing** — any client that presents the matching key can
+claim any username.
+
+### Mode 2: GitHub key list (`Auth.Mode: github-list`)
+
+SOJ fetches each user's public keys from `https://github.com/<username>.keys`
+at startup. The SSH username **must match** the GitHub username — the client's
+presented key is looked up in the fetched set, and the owning GitHub username
+must equal `ctx.User()`.
+
+```yaml
+Auth:
+  Mode: github-list
+  GitHubUsers:
+    - "alice"
+    - "bob"
+    - "charlie"
+  GitHubToken: "ghp_xxx"           # optional; avoids 60 req/hr rate limit
+  GitHubEndpoint: "https://github.com"  # optional; for GitHub Enterprise
+```
+
+**How it works:**
+
+1. At startup, SOJ concurrently fetches keys for all listed users (with a
+   progress bar). Failed fetches are logged as errors but do **not** prevent
+   SOJ from starting — those users simply can't log in until keys are loaded.
+2. Each key is mapped to its GitHub username by SHA256 fingerprint.
+3. On SSH connect, the client's key fingerprint is looked up. If found and the
+   owning username matches `ctx.User()`, authentication succeeds.
+4. Admins can run `ssh oj adm refresh-keys` to re-fetch all keys without
+   restarting SOJ.
+
+**Requirements:**
+
+- SOJ host must be able to reach `github.com` (or the configured endpoint)
+  over HTTPS.
+- Users must have at least one SSH public key configured in their GitHub
+  account settings (`Settings → SSH and GPG keys`).
+- The SSH username used to connect to SOJ **must be identical** to the GitHub
+  username.
+
+**Backward compatibility:** If `Auth` is omitted but `AllowedSSHPubkey` is
+set, SOJ falls back to single-key mode automatically. If neither is set, SOJ
+accepts any key (open mode) with a warning.
+
+---
+
 ## Configuration reference
 
 ### Global config (`config.yaml`)
@@ -279,7 +352,12 @@ followed by another `submit` to see the wrong-answer path.
 |---|---|
 | `HostKey` | SSH host private key (PEM) |
 | `ListenAddr` / `APIAddr` | SSH and HTTP listen addresses |
-| `AllowedSSHPubkey` | Single SSH pubkey allowed in; empty = accept any |
+| `AllowedSSHPubkey` | Single SSH pubkey allowed in; empty = accept any. Legacy; prefer `Auth` |
+| `Auth.Mode` | Authentication mode: `single`, `github-list`, or empty (auto-detect) |
+| `Auth.AllowedSSHPubkey` | Same as top-level `AllowedSSHPubkey` when `Auth.Mode=single` |
+| `Auth.GitHubUsers` | List of GitHub usernames whose SSH keys are fetched at startup (`github-list` mode) |
+| `Auth.GitHubToken` | Optional GitHub personal access token to raise rate limits (60→5000 req/hr) |
+| `Auth.GitHubEndpoint` | GitHub base URL (default `https://github.com`); set for GitHub Enterprise |
 | `SubmitsDir` | Where uploaded submissions live (`<dir>/<user>/<problem>/`) |
 | `SubmitWorkDir` | Per-submission scratch dir (created and torn down per run) |
 | `RealSubmitsDir` / `RealSubmitWorkDir` | Host paths exposed to the container as `SOJ_REAL_*` env vars. Same as the *Dir fields unless SOJ itself runs in a container |
@@ -632,6 +710,15 @@ Common commands:
 SFTP is also exposed as a subsystem (`sftp -P 2222 <user>@<host>`) and lands the
 user in `/work` inside the SFTP container, which is `SubmitsDir/<user>` on the
 host.
+
+Admin-only commands (prefix `adm`):
+
+| Command | Purpose |
+|---|---|
+| `adm list [page]` | List all submissions from all users |
+| `adm status <submit_id>` | View any submission by ID |
+| `adm pause` | Pause new submissions |
+| `adm refresh-keys` | Re-fetch SSH keys from GitHub (`github-list` mode only) |
 
 For the **end-user perspective** (how submitters actually interact with the
 running deployment — upload conventions, OpenSSH version quirks, every command
