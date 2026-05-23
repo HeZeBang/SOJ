@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & run
 
 ```bash
-go build -o soj .              # build the main binary
-sudo ./soj                     # run; needs root because the evaluator chowns
+go build .              # build the main binary
+sudo ./SOJ                     # run; needs root because the evaluator chowns
                                # per-submission dirs into SubmitUid/SubmitGid
 go build ./...                 # verify everything compiles
 ```

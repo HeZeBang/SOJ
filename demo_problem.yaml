@@ -32,3 +32,17 @@ workflow:
     #
     # 用法 C：完全不 mask（默认，省略 mask 字段即可）
     # mask: false
+
+    # === systemd-run properties 直通 ===
+    # 透传到外层 systemd-run scope 的 --property=KEY=VALUE。
+    # 只接受 scope 支持的 cgroup / 超时类属性（service-unit 才有的
+    # NoNewPrivileges / ProtectSystem 等会被 systemd 拒绝）。
+    # 若省略，使用 config.yaml 的 DefaultProperties。
+    #
+    # properties:
+    #   - "AllowedCPUs=0-7"
+    #   - "AllowedMemoryNodes=0"
+    #   - "MemoryMax=4G"
+    #   - "MemorySwapMax=0"
+    #   - "CPUQuota=800%"
+    #   - "TasksMax=256"

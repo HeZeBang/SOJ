@@ -23,6 +23,10 @@ type Config struct {
 	SubmitWorkDir string `yaml:"SubmitWorkDir"`
 	ProblemsDir   string `yaml:"ProblemsDir"`
 
+	// Used by `soj import` to stage built images and scaffold directories.
+	ImagesDir   string `yaml:"ImagesDir"`
+	ScaffoldDir string `yaml:"ScaffoldDir"`
+
 	RealSubmitsDir    string `yaml:"RealSubmitsDir"`
 	RealSubmitWorkDir string `yaml:"RealSubmitWorkDir"`
 
@@ -34,6 +38,8 @@ type Config struct {
 
 	DefaultMaskFiles []string `yaml:"DefaultMaskFiles"`
 	DefaultMaskDirs  []string `yaml:"DefaultMaskDirs"`
+
+	DefaultProperties []string `yaml:"DefaultProperties"`
 
 	SubmitGid int `yaml:"SubmitGid"`
 	SubmitUid int `yaml:"SubmitUid"`
@@ -139,6 +145,21 @@ type Problem struct {
 	Weight   float64    `yaml:"weight"`
 	Submits  []Submit   `yaml:"submits"`
 	Workflow []Workflow `yaml:"workflow"`
+
+	// Package: import-time only metadata, ignored by the runtime evaluator.
+	Package *PackageSpec `yaml:"package,omitempty"`
+}
+
+// PackageSpec 描述如何把一个 problem 目录部署到 SOJ。
+// 由 `soj import` 解析；runtime 不读这一段。
+type PackageSpec struct {
+	Image    *PackageImage `yaml:"image,omitempty"`
+	Scaffold []string      `yaml:"scaffold,omitempty"` // 相对包根的路径；以 / 结尾视为目录递归
+}
+
+type PackageImage struct {
+	Def string `yaml:"def,omitempty"` // Apptainer .def 文件（相对包根）
+	Sif string `yaml:"sif,omitempty"` // 直接给一个已构建好的 .sif（相对包根，与 Def 二选一）
 }
 
 // Submit 提交定义
@@ -163,6 +184,11 @@ type Workflow struct {
 	Mask      bool     `yaml:"mask"`
 	MaskFiles []string `yaml:"maskfiles"`
 	MaskDirs  []string `yaml:"maskdirs"`
+
+	// Properties 直通给 systemd-run 的 --property=KEY=VALUE，每条字符串一个。
+	// 例：["AllowedCPUs=0-31", "AllowedMemoryNodes=0", "MemoryMax=64G", "CPUQuota=3200%"]
+	// 仅 scope 单元支持的 cgroup/超时类属性可用。若为 nil 则回退到 Config.DefaultProperties。
+	Properties []string `yaml:"properties"`
 }
 
 // Mount 挂载定义

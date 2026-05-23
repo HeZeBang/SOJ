@@ -57,7 +57,7 @@ func SftpHandler(sess ssh.Session, cfg *types.Config, sandboxService *ApptainerS
 
 	log.Println(name, "running sftp stdio proxy to container", id)
 
-	_, _, err := sandboxService.ExecContainer(id, "/soj-sftp stdio", 3600, sess, sess, os.Stderr, nil, false)
+	_, _, err := sandboxService.ExecContainer(id, "/soj-sftp stdio", 3600, sess, sess, os.Stderr, nil, false, nil)
 	if err != nil {
 		log.Println(name, "failed to run stdio server in container", id, err)
 		return

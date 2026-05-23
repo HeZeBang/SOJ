@@ -102,7 +102,7 @@ func (s *ApptainerService) CleanContainer(id string) {
 	log.Debug().Str("id", id).Msg("apptainer instance stopped")
 }
 
-func (s *ApptainerService) ExecContainer(id string, cmdStr string, timeout int, stdin io.Reader, stdout, stderr io.Writer, env []string, privileged bool) (int, string, error) {
+func (s *ApptainerService) ExecContainer(id string, cmdStr string, timeout int, stdin io.Reader, stdout, stderr io.Writer, env []string, privileged bool, properties []string) (int, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
@@ -118,8 +118,17 @@ func (s *ApptainerService) ExecContainer(id string, cmdStr string, timeout int, 
 		"--scope",
 		"--quiet",
 		fmt.Sprintf("--property=RuntimeMaxSec=%d", timeout),
-		"apptainer", "exec",
 	}
+
+	// Caller-supplied cgroup properties (AllowedCPUs, MemoryMax, CPUQuota, ...).
+	// systemd applies same-key properties in order so later entries override earlier ones;
+	// platform RuntimeMaxSec is written first so caller-supplied ones can in principle
+	// override it, but callers shouldn't (workflow.Timeout is the source of truth).
+	for _, p := range properties {
+		runArgs = append(runArgs, "--property="+p)
+	}
+
+	runArgs = append(runArgs, "apptainer", "exec")
 
 	if workdir != "" {
 		runArgs = append(runArgs, "--pwd", workdir)

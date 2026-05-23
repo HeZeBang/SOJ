@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/mrhaoxx/SOJ/deploy"
 	"github.com/mrhaoxx/SOJ/file_transfer"
 	"github.com/mrhaoxx/SOJ/judge"
 	"github.com/mrhaoxx/SOJ/types"
@@ -34,6 +35,18 @@ func main() {
 	err = yaml.Unmarshal(_cfg, &cfg)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to parse config file")
+	}
+
+	// 子命令分发：./SOJ import <package-dir>
+	if len(os.Args) >= 2 && os.Args[1] == "import" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: SOJ import <package-dir>")
+			os.Exit(2)
+		}
+		if err := deploy.ImportPackage(&cfg, os.Args[2]); err != nil {
+			log.Fatal().Err(err).Msg("import failed")
+		}
+		return
 	}
 
 	// 解析SSH公钥

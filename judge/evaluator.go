@@ -31,7 +31,7 @@ type Evaluator struct {
 type SandboxInterface interface {
 	RunImage(name string, user string, hostname string, image string, workdir string, mounts []types.Mount, maskFiles []string, maskDirs []string, ReadonlyRootfs bool, networkdisabled bool, timeout int, networkhosted bool, env []string) (ok bool, id string)
 	CleanContainer(id string)
-	ExecContainer(id string, cmd string, timeout int, stdin io.Reader, stdout, stderr io.Writer, env []string, privileged bool) (int, string, error)
+	ExecContainer(id string, cmd string, timeout int, stdin io.Reader, stdout, stderr io.Writer, env []string, privileged bool, properties []string) (int, string, error)
 	GetContainerLogs(id string) (string, error)
 }
 
@@ -262,7 +262,12 @@ workdir_created:
 				rr = &ColoredIO{ctx.Userface, aurora.BlueFg}
 				re = &ColoredIO{ctx.Userface, aurora.RedFg}
 			}
-			ec, logs, err := e.sandbox.ExecContainer(cid, step, workflow.Timeout, nil, rr, re, envs, priv)
+			// workflow.Properties nil ⇒ fall back to platform default; explicit empty slice ⇒ no extras.
+			props := workflow.Properties
+			if props == nil {
+				props = e.cfg.DefaultProperties
+			}
+			ec, logs, err := e.sandbox.ExecContainer(cid, step, workflow.Timeout, nil, rr, re, envs, priv, props)
 
 			if ok {
 				ctx.Userface.Println(aurora.Gray(15, "exit code:"), aurora.Yellow(ec))
