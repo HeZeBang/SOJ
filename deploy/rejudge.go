@@ -144,6 +144,7 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 			user.BestScores[old.Problem] = ctx.JudgeResult.Score * pb.Weight
 			user.BestSubmits[old.Problem] = ctx.ID
 			user.BestSubmitDate[old.Problem] = ctx.SubmitTime
+			user.BestTags[old.Problem] = ctx.JudgeResult.Tag
 			okCnt++
 		} else {
 			// Rejudge didn't yield a passing result; clear the entry so the
@@ -151,6 +152,7 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 			delete(user.BestScores, old.Problem)
 			delete(user.BestSubmits, old.Problem)
 			delete(user.BestSubmitDate, old.Problem)
+			delete(user.BestTags, old.Problem)
 			failCnt++
 			fmt.Printf("  ! rejudge did not pass — cleared %s's score for %s\n", old.User, old.Problem)
 		}

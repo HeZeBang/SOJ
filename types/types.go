@@ -18,6 +18,7 @@ type AuthConfig struct {
 	GitHubUsers      []string `yaml:"GitHubUsers"`      // Mode=github-list 时使用
 	GitHubToken      string   `yaml:"GitHubToken"`      // 可选，避免 rate limit
 	GitHubEndpoint   string   `yaml:"GitHubEndpoint"`   // 可选，默认 https://github.com，支持 GitHub Enterprise
+	KeyCachePath     string   `yaml:"KeyCachePath"`     // 可选，密钥缓存文件路径（默认 ./keys_cache.json）
 }
 
 // Config 全局配置

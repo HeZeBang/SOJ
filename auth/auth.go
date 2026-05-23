@@ -3,7 +3,9 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +29,64 @@ type AuthManager struct {
 
 	mu        sync.RWMutex
 	keyToUser map[string]string // fingerprint → username
+}
+
+type keyCache struct {
+	UpdatedAt time.Time         `json:"updated_at"`
+	Keys      map[string]string `json:"keys"` // fingerprint → username
+}
+
+const cacheMaxAge = 24 * time.Hour
+
+func (m *AuthManager) cachePath() string {
+	if m.cfg.KeyCachePath != "" {
+		return m.cfg.KeyCachePath
+	}
+	return "keys_cache.json"
+}
+
+func (m *AuthManager) loadCache() (map[string]string, bool) {
+	path := m.cachePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var cache keyCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		log.Warn().Err(err).Str("path", path).Msg("auth: corrupt key cache, ignoring")
+		return nil, false
+	}
+	if time.Since(cache.UpdatedAt) > cacheMaxAge {
+		log.Info().Time("updated_at", cache.UpdatedAt).Msg("auth: key cache expired, will refetch")
+		return nil, false
+	}
+	if len(cache.Keys) == 0 {
+		return nil, false
+	}
+	log.Info().
+		Str("path", path).
+		Time("updated_at", cache.UpdatedAt).
+		Int("keys", len(cache.Keys)).
+		Msg("auth: loaded keys from cache")
+	return cache.Keys, true
+}
+
+func (m *AuthManager) saveCache(keys map[string]string) {
+	cache := keyCache{
+		UpdatedAt: time.Now(),
+		Keys:      keys,
+	}
+	data, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		log.Error().Err(err).Msg("auth: failed to marshal key cache")
+		return
+	}
+	path := m.cachePath()
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		log.Error().Err(err).Str("path", path).Msg("auth: failed to write key cache")
+		return
+	}
+	log.Info().Str("path", path).Int("keys", len(keys)).Msg("auth: key cache saved")
 }
 
 // NewAuthManager 创建 AuthManager，根据配置模式加载公钥
@@ -108,6 +168,14 @@ func (m *AuthManager) loadGitHubList() error {
 		return fmt.Errorf("github-list mode requires at least one GitHubUsers entry")
 	}
 
+	// Try loading from cache first
+	if cached, ok := m.loadCache(); ok {
+		m.mu.Lock()
+		m.keyToUser = cached
+		m.mu.Unlock()
+		return nil
+	}
+
 	log.Info().
 		Str("endpoint", m.endpoint).
 		Int("users", len(m.cfg.GitHubUsers)).
@@ -121,14 +189,21 @@ func (m *AuthManager) loadGitHubList() error {
 	// 写入密钥映射
 	m.mu.Lock()
 	totalKeys := 0
+	newMap := make(map[string]string)
 	for username, userKeys := range result.Keys {
 		for _, pk := range userKeys {
 			fp := fingerprint(pk)
+			newMap[fp] = username
 			m.keyToUser[fp] = username
 			totalKeys++
 		}
 	}
 	m.mu.Unlock()
+
+	// Save to cache
+	if totalKeys > 0 {
+		m.saveCache(newMap)
+	}
 
 	// 打印汇总
 	log.Info().
@@ -222,6 +297,11 @@ func (m *AuthManager) Refresh() error {
 	m.mu.Lock()
 	m.keyToUser = newMap
 	m.mu.Unlock()
+
+	// Save to cache
+	if totalKeys > 0 {
+		m.saveCache(newMap)
+	}
 
 	log.Info().
 		Int("loaded", result.LoadedUsers).

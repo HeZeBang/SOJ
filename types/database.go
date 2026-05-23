@@ -94,6 +94,7 @@ func (ds *DatabaseService) GetUserByID(userID string) (*User, error) {
 		}
 		return nil, result.Error
 	}
+	ensureMaps(&user)
 	return &user, nil
 }
 
@@ -104,6 +105,7 @@ func (ds *DatabaseService) GetUserByToken(token string) (*User, error) {
 	if result.Error != nil {
 		return nil, result.Error
 	}
+	ensureMaps(&user)
 	return &user, nil
 }
 
