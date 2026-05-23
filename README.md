@@ -180,6 +180,7 @@ APIAddr:    "0.0.0.0:8080"
 #     - "bob"
 #   GitHubToken: "ghp_xxx"           # optional, avoids rate limit
 #   GitHubEndpoint: "https://github.com"  # optional, for GitHub Enterprise
+#   KeyCachePath: "./keys_cache.json"     # optional, key cache file (default ./keys_cache.json)
 
 SubmitsDir:        /data/soj/submits
 SubmitWorkDir:     /data/soj/work
@@ -332,14 +333,18 @@ Auth:
 
 **How it works:**
 
-1. At startup, SOJ concurrently fetches keys for all listed users (with a
-   progress bar). Failed fetches are logged as errors but do **not** prevent
-   SOJ from starting — those users simply can't log in until keys are loaded.
-2. Each key is mapped to its GitHub username by SHA256 fingerprint.
-3. On SSH connect, the client's key fingerprint is looked up. If found and the
+1. At startup, SOJ checks for a cached key file (default `./keys_cache.json`,
+   configurable via `Auth.KeyCachePath`). If the cache exists and is less than
+   24 hours old, keys are loaded from disk — no GitHub fetch occurs.
+2. If the cache is missing or stale, SOJ concurrently fetches keys for all
+   listed users (with a progress bar). Failed fetches are logged as errors but
+   do **not** prevent SOJ from starting — those users simply can't log in until
+   keys are loaded.
+3. Each key is mapped to its GitHub username by SHA256 fingerprint.
+4. On SSH connect, the client's key fingerprint is looked up. If found and the
    owning username matches `ctx.User()`, authentication succeeds.
-4. Admins can run `ssh oj adm refresh-keys` to re-fetch all keys without
-   restarting SOJ.
+5. Admins can run `ssh oj adm refresh-keys` to re-fetch all keys without
+   restarting SOJ (also updates the cache).
 
 **Requirements:**
 
@@ -370,6 +375,7 @@ accepts any key (open mode) with a warning.
 | `Auth.GitHubUsers` | List of GitHub usernames whose SSH keys are fetched at startup (`github-list` mode) |
 | `Auth.GitHubToken` | Optional GitHub personal access token to raise rate limits (60→5000 req/hr) |
 | `Auth.GitHubEndpoint` | GitHub base URL (default `https://github.com`); set for GitHub Enterprise |
+| `Auth.KeyCachePath` | Path to SSH key cache file (default `./keys_cache.json`). Keys are cached for 24h to avoid GitHub fetches on restart |
 | `SubmitsDir` | Where uploaded submissions live (`<dir>/<user>/<problem>/`) |
 | `SubmitWorkDir` | Per-submission scratch dir (created and torn down per run) |
 | `RealSubmitsDir` / `RealSubmitWorkDir` | Host paths exposed to the container as `SOJ_REAL_*` env vars. Same as the *Dir fields unless SOJ itself runs in a container |
@@ -438,9 +444,14 @@ The final step (in the last workflow) must leave a `result.json` in `/result/`:
   "score": 100,
   "message": "...",
   "memory": 0,
-  "time": 0
+  "time": 0,
+  "tag": "6.00x"
 }
 ```
+
+The `tag` field is an optional string displayed alongside the score in the
+rank table and other views (e.g. `90.00 (6.00x)`). Empty or omitted means no
+tag is shown.
 
 Environment variables available in every step:
 
@@ -726,7 +737,7 @@ Common commands:
 | `status <submit_id>` | `st` | Show one submission in detail |
 | `describe [problem_id]` | `desc` | With no arg: list all problem IDs. With one: show id, text, and required submits |
 | `my` | | Your best scores per problem |
-| `rank` | `rk` | Leaderboard |
+| `rank` | `rk` | Leaderboard; scores show `(tag)` suffix when available (e.g. `90.00 (6.00x)`) |
 | `token` | | Token cookie for the HTTP API |
 
 SFTP is also exposed as a subsystem (`sftp -P 2222 <user>@<host>`) and lands the
@@ -773,6 +784,7 @@ sudo rm -rf /var/lib/soj
 rm -f /tmp/soj-sftp.sif /tmp/soj-sftp /tmp/soj-sftp.def
 rm -f /tmp/debian.sif
 rm -f /tmp/soj_host_key /tmp/soj_host_key.pub
+rm -f keys_cache.json
 
 # Drop the judge UNIX user (and its home dir)
 sudo userdel -r judge

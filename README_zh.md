@@ -145,6 +145,7 @@ APIAddr:    "0.0.0.0:8080"
 #     - "bob"
 #   GitHubToken: "ghp_xxx"                   # 可选，避免 rate limit
 #   GitHubEndpoint: "https://github.com"     # 可选，用于 GitHub Enterprise
+#   KeyCachePath: "./keys_cache.json"        # 可选，密钥缓存文件路径（默认 ./keys_cache.json）
 
 SubmitsDir:        /data/soj/submits
 SubmitWorkDir:     /data/soj/work
@@ -283,10 +284,11 @@ Auth:
 
 **工作原理：**
 
-1. 启动时，SOJ 并发拉取所有列出用户的密钥（带进度条）。拉取失败会记录错误日志但**不会**阻止 SOJ 启动 — 失败的用户在密钥加载前无法登录。
-2. 每个密钥通过 SHA256 指纹映射到其 GitHub 用户名。
-3. SSH 连接时，查找客户端密钥的指纹。如果找到且拥有用户名与 `ctx.User()` 匹配，则认证成功。
-4. 管理员可运行 `ssh oj adm refresh-keys` 重新拉取所有密钥，无需重启 SOJ。
+1. 启动时，SOJ 检查缓存文件（默认 `./keys_cache.json`，可通过 `Auth.KeyCachePath` 配置）。如果缓存存在且未超过 24 小时，直接从磁盘加载密钥，不请求 GitHub。
+2. 如果缓存不存在或已过期，SOJ 并发拉取所有列出用户的密钥（带进度条）。拉取失败会记录错误日志但**不会**阻止 SOJ 启动 — 失败的用户在密钥加载前无法登录。
+3. 每个密钥通过 SHA256 指纹映射到其 GitHub 用户名。
+4. SSH 连接时，查找客户端密钥的指纹。如果找到且拥有用户名与 `ctx.User()` 匹配，则认证成功。
+5. 管理员可运行 `ssh oj adm refresh-keys` 重新拉取所有密钥，无需重启 SOJ（同时更新缓存）。
 
 **要求：**
 
@@ -312,6 +314,7 @@ Auth:
 | `Auth.GitHubUsers` | GitHub 用户名列表，启动时拉取其 SSH 公钥（`github-list` 模式） |
 | `Auth.GitHubToken` | 可选的 GitHub 个人访问令牌，提升 rate limit（60→5000 请求/小时） |
 | `Auth.GitHubEndpoint` | GitHub 基础 URL（默认 `https://github.com`）；用于 GitHub Enterprise |
+| `Auth.KeyCachePath` | SSH 密钥缓存文件路径（默认 `./keys_cache.json`）。缓存 24 小时有效，避免重启时重复请求 GitHub |
 | `SubmitsDir` | 上传提交存储位置 (`<dir>/<user>/<problem>/`) |
 | `SubmitWorkDir` | 每次提交的临时工作目录（每次运行时创建和销毁） |
 | `RealSubmitsDir` / `RealSubmitWorkDir` | 作为 `SOJ_REAL_*` 环境变量暴露给容器的宿主机路径。除非 SOJ 本身在容器中运行，否则与 *Dir 字段相同 |
@@ -377,9 +380,12 @@ workflow:                   # 一个或多个阶段，顺序执行
   "score": 100,
   "message": "...",
   "memory": 0,
-  "time": 0
+  "time": 0,
+  "tag": "6.00x"
 }
 ```
+
+`tag` 字段为可选字符串，会附带显示在分数旁（如 `90.00 (6.00x)`）。为空或省略则不显示。
 
 每步可用的环境变量：
 
@@ -596,7 +602,7 @@ SOJ 运行后，`ssh -p 2222 <user>@<host>` 打开交互式会话。常用命令
 | `status <submit_id>` | `st` | 显示单个提交详情 |
 | `describe [problem_id]` | `desc` | 无参数：列出所有题目 ID。有参数：显示 id、文本和所需提交 |
 | `my` | | 你的每题最高分 |
-| `rank` | `rk` | 排行榜 |
+| `rank` | `rk` | 排行榜；分数后附带 `(tag)` 后缀（如 `90.00 (6.00x)`） |
 | `token` | | HTTP API 的 Token cookie |
 
 SFTP 也作为子系统暴露（`sftp -P 2222 <user>@<host>`），用户进入 SFTP 容器内的 `/work`，对应宿主机上的 `SubmitsDir/<user>`。
@@ -636,6 +642,7 @@ sudo rm -rf /var/lib/soj
 rm -f /tmp/soj-sftp.sif /tmp/soj-sftp /tmp/soj-sftp.def
 rm -f /tmp/debian.sif
 rm -f /tmp/soj_host_key /tmp/soj_host_key.pub
+rm -f keys_cache.json
 
 # 删除评测 UNIX 用户（及其 home 目录）
 sudo userdel -r judge
