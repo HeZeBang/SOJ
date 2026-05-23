@@ -207,7 +207,11 @@ func writeResult(uf types.Userface, res types.SubmitCtx) {
 		return
 	}
 	if res.JudgeResult.Success {
-		uf.Printf("Score %.2f %s\n", aurora.Underline(aurora.Bold(types.ColorizeScore(res.JudgeResult))), aurora.Italic(aurora.Gray(15, "max.100 (Unweighted)")))
+		scoreStr := fmt.Sprintf("%.2f", res.JudgeResult.Score)
+		if res.JudgeResult.Tag != "" {
+			scoreStr = fmt.Sprintf("%s [%s]", scoreStr, res.JudgeResult.Tag)
+		}
+		uf.Printf("Score %s %s\n", aurora.Underline(aurora.Bold(scoreStr)), aurora.Italic(aurora.Gray(15, "max.100 (Unweighted)")))
 	} else {
 		uf.Println(aurora.Red("Judgement is Failed"))
 	}

@@ -52,6 +52,7 @@ func (ds *DatabaseService) CreateUser(userID string) (*User, error) {
 		BestScores:     make(map[string]float64),
 		BestSubmits:    make(map[string]string),
 		BestSubmitDate: make(map[string]int64),
+		BestTags:       make(map[string]string),
 		TotalScore:     0,
 	}
 
@@ -62,6 +63,24 @@ func (ds *DatabaseService) CreateUser(userID string) (*User, error) {
 
 	log.Info().Str("user", userID).Msg("Created new user")
 	return user, nil
+}
+
+// ensureMaps lazy-initializes all JMap fields on User so old rows (where the
+// column was NULL because the field didn't exist at insert time) don't panic
+// on assignment. Safe to call on a freshly created user too.
+func ensureMaps(u *User) {
+	if u.BestScores == nil {
+		u.BestScores = make(JMapStrFloat64)
+	}
+	if u.BestSubmits == nil {
+		u.BestSubmits = make(JMapStrString)
+	}
+	if u.BestSubmitDate == nil {
+		u.BestSubmitDate = make(JMapStrInt64)
+	}
+	if u.BestTags == nil {
+		u.BestTags = make(JMapStrString)
+	}
 }
 
 // GetUserByID 根据ID获取用户
@@ -108,6 +127,7 @@ func (ds *DatabaseService) UpdateUserSubmitResult(userID string, submit *SubmitC
 	if err != nil {
 		return err
 	}
+	ensureMaps(user)
 
 	if submit.Status == "completed" && submit.JudgeResult.Success {
 		newScore := submit.JudgeResult.Score * problem.Weight
@@ -115,6 +135,7 @@ func (ds *DatabaseService) UpdateUserSubmitResult(userID string, submit *SubmitC
 			user.BestScores[submit.Problem] = newScore
 			user.BestSubmits[submit.Problem] = submit.ID
 			user.BestSubmitDate[submit.Problem] = submit.SubmitTime
+			user.BestTags[submit.Problem] = submit.JudgeResult.Tag
 		}
 	}
 
@@ -131,6 +152,7 @@ func (ds *DatabaseService) DoFullUserScan(problems map[string]Problem) error {
 
 	userMap := make(map[string]User)
 	for _, user := range users {
+		ensureMaps(&user)
 		userMap[user.ID] = user
 	}
 
@@ -148,6 +170,7 @@ func (ds *DatabaseService) DoFullUserScan(problems map[string]Problem) error {
 					u.BestScores[s.Problem] = newScore
 					u.BestSubmits[s.Problem] = s.ID
 					u.BestSubmitDate[s.Problem] = s.SubmitTime
+					u.BestTags[s.Problem] = s.JudgeResult.Tag
 				}
 			}
 		}

@@ -48,11 +48,14 @@ SubmitWorkDir/<submitID>/
 - `apptainer` (tested with 1.5.0) — **must be built with libseccomp support**
   (`apptainer --version` should mention seccomp). Without it, `--security
   seccomp:…` is silently a no-op and the default profile won't be applied.
-- `setpriv` (util-linux ≥ 2.34) **must be present inside every container image
-  used by SOJ** — it's how each non-privileged step drops uid inside the
-  container. Debian, Alpine, Arch base images already ship it; minimal /
-  distroless / scratch images do **not** and will fail with `exec: setpriv:
-  not found`.
+- `setpriv` (util-linux ≥ 2.34) **must be present inside every judge image**
+  — it's how each non-privileged step drops uid inside the container.
+  Debian, Alpine `apk add util-linux`, and Arch base images ship it. **busybox
+  and minimal / distroless / scratch images do NOT** — busybox has a `setpriv`
+  applet but it's a subset that lacks `--reuid` / `--regid` / `--clear-groups`
+  and will fail with `setpriv: unrecognized option '--reuid=…'`. (The SFTP
+  subsystem image is exempt — it self-drops in Go via
+  `SOJ_DROP_UID`/`SOJ_DROP_GID` env vars, so busybox is fine there.)
 - `go` 1.21+ for building
 - `docker` only needed if you want to build subsystem images via Dockerfile;
   otherwise plain `go build` + an Apptainer def file is enough
@@ -95,8 +98,17 @@ go build -o soj .
 
 ### 5. Build the SFTP subsystem SIF
 
-The SFTP subsystem is a Go binary served as an SSH subsystem.
-Build it statically and wrap it in a SIF using `apptainer build --fakeroot`.
+The SFTP subsystem is a Go binary served as an SSH subsystem. It runs as
+container root and **drops its own uid in-process** to
+`$SOJ_DROP_UID`/`$SOJ_DROP_GID` (passed by SOJ) so uploaded files end up
+owned by `SubmitUid` on the host. This means the SFTP image can stay on
+busybox — it does not need an external `setpriv`.
+
+> **Rebuild required after upgrading SOJ to the security-envelope refactor.**
+> Old `/tmp/soj-sftp` binaries don't know about `SOJ_DROP_UID`/`SOJ_DROP_GID`
+> and will keep serving as container root — uploaded files will be root-owned.
+
+Build statically and wrap in a SIF:
 
 ```bash
 cd subsystems/sftp
@@ -522,6 +534,16 @@ host (root)
               sh -c "<step command>"
 ```
 
+**SFTP subsystem exception.** The SFTP container takes a shortcut: the
+`/soj-sftp` Go binary itself calls `setresuid`/`setresgid` from the
+`SOJ_DROP_UID`/`SOJ_DROP_GID` env vars before serving any request, so SOJ
+launches it as container-root (`Privileged: true`) and the in-container
+setpriv step is skipped entirely. This lets the SFTP SIF stay on `busybox`
+even though busybox's setpriv applet is too limited for the judge path.
+CAP_SETUID/CAP_SETGID are still added at instance start so the in-Go drop
+syscall succeeds; they are wiped at the uid transition the same way they
+would be for the judge path.
+
 Important consequence: **`addcaps` does not survive the setpriv uid drop**.
 A workflow with `noprivs: true, addcaps: [CAP_SYS_NICE]` and non-privileged
 steps gives the *step command* zero effective capabilities — the cap was
@@ -774,8 +796,11 @@ owned by root — clean those with `sudo`.
 | `failed to read result file` | The last workflow step didn't write `/result/result.json` |
 | `rejected sftp session: invalid username` | Username contains characters outside `[A-Za-z0-9_-]` — required to avoid argument injection into `apptainer` |
 | Submissions stuck at `dead` | A previous SOJ run crashed mid-judge. Status is rewritten to `dead` at startup; submit again |
-| `exec: setpriv: not found` or step exits 127 immediately | Container image lacks `setpriv` (util-linux). Rebuild the image with `util-linux` installed, or mark the affected step `privilegedsteps: [<n>]` to skip setpriv |
+| `exec: setpriv: not found` or step exits 127 immediately | Judge image lacks `setpriv` (util-linux). Rebuild the image with `util-linux` installed, or mark the affected step `privilegedsteps: [<n>]` to skip setpriv |
+| `setpriv: unrecognized option '--reuid=…'` (BusyBox usage banner) | Image's `setpriv` is busybox's applet, not util-linux. Switch the base to Alpine + `apk add util-linux`, or Debian, or any image that ships full util-linux. SFTP is exempt and self-drops in Go |
 | `setpriv: setresuid: Operation not permitted` | `noprivs: true` was applied but `CAP_SETUID/CAP_SETGID` are missing from the bounding set. The evaluator auto-adds them — if you see this, check that the workflow's `dropcaps:` isn't dropping them again, and that no host-level seccomp or AppArmor profile is interfering |
+| `setresgid(N): operation not permitted` (in `/soj-sftp` output) | SFTP container started without `CAP_SETUID/CAP_SETGID` in its bounding set. This shouldn't happen — `file_transfer/sftp.go` adds them when `SubmitUid > 0`. Confirm SOJ was rebuilt after the security-envelope refactor (`go build`) |
+| SFTP uploads land as root-owned on host | `/soj-sftp` binary is old (pre security-envelope refactor) and doesn't read `SOJ_DROP_UID`. Rebuild `subsystems/sftp` and the `.sif` per step 5 |
 | `seccomp profile applied but workload still uses io_uring` | `apptainer --version` doesn't mention seccomp — apptainer was built without libseccomp and `--security seccomp:` is silently ignored. Rebuild apptainer with seccomp support |
 | `apptainer instance start failed: invalid argument: --security seccomp:…` | `DefaultSeccomp` points at a missing or malformed JSON. Validate with `python3 -m json.tool /var/lib/soj/seccomp/soj-default.json` |
 | `runtime/cgo: pthread_create failed: Operation not permitted` then segfault | The seccomp profile is filtering `clone3` (e.g. returning ENOSYS). glibc ≥ 2.37 no longer falls back to `clone(2)` and the apptainer starter dies. Remove any `clone3` rule from the profile; rely on `kernel.unprivileged_userns_clone = 0` at the host level instead |

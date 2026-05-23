@@ -3,11 +3,29 @@ package file_transfer
 import (
 	"log"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	ssh "github.com/gliderlabs/ssh"
 	"github.com/mrhaoxx/SOJ/types"
 )
+
+// appendIfMissing 大小写不敏感地把 want 中不在 caps 里的项追加进去。
+func appendIfMissing(caps []string, want ...string) []string {
+	have := make(map[string]struct{}, len(caps))
+	for _, c := range caps {
+		have[strings.ToUpper(c)] = struct{}{}
+	}
+	for _, w := range want {
+		if _, ok := have[strings.ToUpper(w)]; ok {
+			continue
+		}
+		caps = append(caps, w)
+		have[strings.ToUpper(w)] = struct{}{}
+	}
+	return caps
+}
 
 // isValidUsername rejects usernames that could inject arguments into apptainer commands.
 func isValidUsername(u string) bool {
@@ -40,6 +58,16 @@ func SftpHandler(sess ssh.Session, cfg *types.Config, sandboxService *ApptainerS
 
 	os.Chown(path, cfg.SubmitUid, cfg.SubmitGid)
 
+	// 容器内 setpriv 在 busybox 镜像里不带 --reuid（applet 是 util-linux 的子集），
+	// 所以 SFTP 走自降权路径：实例以容器 root 启动并保留 CAP_SETUID/CAP_SETGID，
+	// /soj-sftp 启动后通过 SOJ_DROP_UID/GID 环境变量在 Go 里自己 setresuid 到
+	// SubmitUid，这样上传的文件在宿主上就是 SubmitUid 所有，且不依赖镜像里有没有
+	// 完整版 setpriv。
+	addCaps := append([]string{}, cfg.DefaultAddCaps...)
+	if cfg.SubmitUid > 0 {
+		addCaps = appendIfMissing(addCaps, "CAP_SETUID", "CAP_SETGID")
+	}
+
 	success, id := sandboxService.RunImage(RunImageOpts{
 		Name:     name,
 		Hostname: "soj-sftpd",
@@ -56,10 +84,13 @@ func SftpHandler(sess ssh.Session, cfg *types.Config, sandboxService *ApptainerS
 		MaskDirs:       cfg.DefaultMaskDirs,
 		ReadonlyRootfs: true,
 		Timeout:        120,
-		// 同享 SOJ 默认的能力 / seccomp 信封；sftp-server 不需要额外特权。
+		Env: []string{
+			"SOJ_DROP_UID=" + strconv.Itoa(cfg.SubmitUid),
+			"SOJ_DROP_GID=" + strconv.Itoa(cfg.SubmitGid),
+		},
 		NoPrivs:  cfg.DefaultNoPrivs,
 		DropCaps: cfg.DefaultDropCaps,
-		AddCaps:  cfg.DefaultAddCaps,
+		AddCaps:  addCaps,
 		Seccomp:  cfg.DefaultSeccomp,
 	})
 
@@ -71,14 +102,14 @@ func SftpHandler(sess ssh.Session, cfg *types.Config, sandboxService *ApptainerS
 
 	log.Println(name, "running sftp stdio proxy to container", id)
 
+	// /soj-sftp 自己处理 uid 降权，所以这里走 Privileged: true 跳过外层 setpriv 包装。
 	_, _, err := sandboxService.ExecContainer(id, ExecOpts{
-		Cmd:     "/soj-sftp stdio",
-		Timeout: 3600,
-		Stdin:   sess,
-		Stdout:  sess,
-		Stderr:  os.Stderr,
-		UID:     cfg.SubmitUid,
-		GID:     cfg.SubmitGid,
+		Cmd:        "/soj-sftp stdio",
+		Timeout:    3600,
+		Stdin:      sess,
+		Stdout:     sess,
+		Stderr:     os.Stderr,
+		Privileged: true,
 	})
 	if err != nil {
 		log.Println(name, "failed to run stdio server in container", id, err)

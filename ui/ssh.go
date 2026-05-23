@@ -142,7 +142,12 @@ func (sh *SSHHandler) handleRank(uf types.Userface) {
 	for _, p := range prblmss {
 		var scores []string
 		for _, u := range users {
-			scores = append(scores, fmt.Sprintf("%.2f", u.BestScores[p]))
+			tag := u.BestTags[p]
+			if tag != "" {
+				scores = append(scores, fmt.Sprintf("%.2f(%s)", u.BestScores[p], tag))
+			} else {
+				scores = append(scores, fmt.Sprintf("%.2f", u.BestScores[p]))
+			}
 		}
 		bestscores = append(bestscores, scores)
 	}
@@ -307,8 +312,13 @@ func (sh *SSHHandler) handleMy(s ssh.Session, uf types.Userface) {
 		if ok {
 			map_succ[problem_id] = true
 		}
+		scoreStr := fmt.Sprintf("%.2f", sco/sh.problems[problem_id].Weight)
+		tag := user.BestTags[problem_id]
+		if tag != "" {
+			scoreStr = fmt.Sprintf("%s(%s)", scoreStr, tag)
+		}
 		ColLongest[0] = max(ColLongest[0], len(problem_id))
-		ColLongest[1] = max(ColLongest[1], len(fmt.Sprintf("%.2f", sco/sh.problems[problem_id].Weight)))
+		ColLongest[1] = max(ColLongest[1], len(scoreStr))
 		ColLongest[2] = max(ColLongest[2], len(fmt.Sprintf("%.2f", sh.problems[problem_id].Weight)))
 		ColLongest[3] = max(ColLongest[3], len(user.BestSubmits[problem_id]))
 		ColLongest[4] = max(ColLongest[4], len(time.Unix(0, user.BestSubmitDate[problem_id]).Format(time.DateTime+" MST")))
@@ -320,9 +330,15 @@ func (sh *SSHHandler) handleMy(s ssh.Session, uf types.Userface) {
 
 	uf.Println()
 	for _, problem_id := range prblmss {
-		uf.Printf("%-*s %-*.2f %-*.2f %-*s %-*s\n",
+		unweightedScore := user.BestScores[problem_id] / sh.problems[problem_id].Weight
+		scoreStr := fmt.Sprintf("%.2f", unweightedScore)
+		tag := user.BestTags[problem_id]
+		if tag != "" {
+			scoreStr = fmt.Sprintf("%s(%s)", scoreStr, tag)
+		}
+		uf.Printf("%-*s %-*s %-*.2f %-*s %-*s\n",
 			ColLongest[0], aurora.Bold(aurora.Italic(problem_id)),
-			ColLongest[1], aurora.Bold(types.ColorizeScore(types.JudgeResult{Success: map_succ[problem_id], Score: user.BestScores[problem_id] / sh.problems[problem_id].Weight})),
+			ColLongest[1], aurora.Bold(scoreStr),
 			ColLongest[2], aurora.Bold(sh.problems[problem_id].Weight),
 			ColLongest[3], aurora.Magenta(user.BestSubmits[problem_id]),
 			ColLongest[4],
@@ -432,12 +448,16 @@ func (sh *SSHHandler) listSubs(uf types.Userface, submits []types.SubmitCtx) {
 		}
 
 		for _, submit := range submits {
+			scoreStr := fmt.Sprintf("%.2f", submit.JudgeResult.Score)
+			if submit.JudgeResult.Tag != "" {
+				scoreStr = fmt.Sprintf("%s(%s)", scoreStr, submit.JudgeResult.Tag)
+			}
 			ColLongest[0] = max(ColLongest[0], len(submit.ID))
 			ColLongest[1] = max(ColLongest[1], len(submit.User))
 			ColLongest[2] = max(ColLongest[2], len(submit.Problem))
 			ColLongest[3] = max(ColLongest[3], len(submit.Status))
 			ColLongest[4] = max(ColLongest[4], len(submit.Msg))
-			ColLongest[5] = max(ColLongest[5], len(fmt.Sprintf("%.2f", submit.JudgeResult.Score)))
+			ColLongest[5] = max(ColLongest[5], len(scoreStr))
 			ColLongest[6] = max(ColLongest[6], len(sh.omitStr(submit.JudgeResult.Msg, 20)))
 			ColLongest[7] = max(ColLongest[7], len(time.Unix(0, submit.SubmitTime).Format(time.DateTime)))
 		}
@@ -448,13 +468,17 @@ func (sh *SSHHandler) listSubs(uf types.Userface, submits []types.SubmitCtx) {
 		uf.Println()
 
 		for _, submit := range submits {
-			uf.Printf("%-*s %-*s %-*s %-*s %-*s %-*.2f %-*s %-*s\n",
+			scoreStr := fmt.Sprintf("%.2f", submit.JudgeResult.Score)
+			if submit.JudgeResult.Tag != "" {
+				scoreStr = fmt.Sprintf("%s(%s)", scoreStr, submit.JudgeResult.Tag)
+			}
+			uf.Printf("%-*s %-*s %-*s %-*s %-*s %-*s %-*s %-*s\n",
 				ColLongest[0], aurora.Magenta(submit.ID),
 				ColLongest[1], aurora.Blue(submit.User),
 				ColLongest[2], aurora.Bold(submit.Problem),
 				ColLongest[3], types.ColorizeStatus(submit.Status),
 				ColLongest[4], aurora.Gray(15, submit.Msg),
-				ColLongest[5], types.ColorizeScore(submit.JudgeResult),
+				ColLongest[5], aurora.Bold(scoreStr),
 				ColLongest[6], aurora.Gray(15, sh.omitStr(submit.JudgeResult.Msg, 20)),
 				ColLongest[7], aurora.Yellow(time.Unix(0, submit.SubmitTime).Format(time.DateTime)))
 		}
@@ -472,7 +496,11 @@ func (sh *SSHHandler) showSub(uf types.Userface, submit types.SubmitCtx) {
 
 	if submit.Status == "completed" {
 		if submit.JudgeResult.Success {
-			uf.Printf("Score %.2f %s\n", aurora.Underline(aurora.Bold(types.ColorizeScore(submit.JudgeResult))), aurora.Italic(aurora.Gray(15, "max.100 (Unweighted)")))
+			scoreStr := fmt.Sprintf("%.2f", submit.JudgeResult.Score)
+			if submit.JudgeResult.Tag != "" {
+				scoreStr = fmt.Sprintf("%s [%s]", scoreStr, submit.JudgeResult.Tag)
+			}
+			uf.Printf("Score %s %s\n", aurora.Underline(aurora.Bold(scoreStr)), aurora.Italic(aurora.Gray(15, "max.100 (Unweighted)")))
 		} else {
 			uf.Println(aurora.Red("Judgement is Failed"))
 		}

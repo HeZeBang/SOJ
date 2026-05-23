@@ -71,6 +71,7 @@ type JudgeResult struct {
 	Msg     string  `json:"message"`
 	Memory  uint64  `json:"memory"` // in bytes
 	Time    uint64  `json:"time"`   // in ns
+	Tag     string  `json:"tag"`    // optional tag (e.g. "6.00x")
 }
 
 // WorkflowResult 工作流结果
@@ -242,6 +243,7 @@ type User struct {
 	BestScores     JMapStrFloat64 `json:"best_scores"`
 	BestSubmits    JMapStrString  `json:"best_submits"`
 	BestSubmitDate JMapStrInt64   `json:"best_submit_date"`
+	BestTags       JMapStrString  `json:"best_tags"`
 	TotalScore     float64        `json:"total_score"`
 }
 
