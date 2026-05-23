@@ -3,7 +3,6 @@ package file_transfer
 import (
 	"log"
 	"os"
-	"strconv"
 	"time"
 
 	ssh "github.com/gliderlabs/ssh"
@@ -41,13 +40,28 @@ func SftpHandler(sess ssh.Session, cfg *types.Config, sandboxService *ApptainerS
 
 	os.Chown(path, cfg.SubmitUid, cfg.SubmitGid)
 
-	success, id := sandboxService.RunImage(name, strconv.Itoa(cfg.SubmitUid), "soj-sftpd", cfg.SftpImage, "/", []types.Mount{
-		{
-			Type:   "bind",
-			Source: path,
-			Target: "/work",
+	success, id := sandboxService.RunImage(RunImageOpts{
+		Name:     name,
+		Hostname: "soj-sftpd",
+		Image:    cfg.SftpImage,
+		Workdir:  "/",
+		Mounts: []types.Mount{
+			{
+				Type:   "bind",
+				Source: path,
+				Target: "/work",
+			},
 		},
-	}, cfg.DefaultMaskFiles, cfg.DefaultMaskDirs, true, false, 120, false, nil)
+		MaskFiles:      cfg.DefaultMaskFiles,
+		MaskDirs:       cfg.DefaultMaskDirs,
+		ReadonlyRootfs: true,
+		Timeout:        120,
+		// 同享 SOJ 默认的能力 / seccomp 信封；sftp-server 不需要额外特权。
+		NoPrivs:  cfg.DefaultNoPrivs,
+		DropCaps: cfg.DefaultDropCaps,
+		AddCaps:  cfg.DefaultAddCaps,
+		Seccomp:  cfg.DefaultSeccomp,
+	})
 
 	if !success {
 		log.Println(name, "failed to run sftp container")
@@ -57,7 +71,15 @@ func SftpHandler(sess ssh.Session, cfg *types.Config, sandboxService *ApptainerS
 
 	log.Println(name, "running sftp stdio proxy to container", id)
 
-	_, _, err := sandboxService.ExecContainer(id, "/soj-sftp stdio", 3600, sess, sess, os.Stderr, nil, false, nil)
+	_, _, err := sandboxService.ExecContainer(id, ExecOpts{
+		Cmd:     "/soj-sftp stdio",
+		Timeout: 3600,
+		Stdin:   sess,
+		Stdout:  sess,
+		Stderr:  os.Stderr,
+		UID:     cfg.SubmitUid,
+		GID:     cfg.SubmitGid,
+	})
 	if err != nil {
 		log.Println(name, "failed to run stdio server in container", id, err)
 		return

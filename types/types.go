@@ -41,6 +41,12 @@ type Config struct {
 
 	DefaultProperties []string `yaml:"DefaultProperties"`
 
+	// 默认安全配置。每个 workflow 可以覆盖（或追加 AddCaps）。
+	DefaultNoPrivs  bool     `yaml:"DefaultNoPrivs"`
+	DefaultDropCaps []string `yaml:"DefaultDropCaps"`
+	DefaultAddCaps  []string `yaml:"DefaultAddCaps"`
+	DefaultSeccomp  string   `yaml:"DefaultSeccomp"`
+
 	SubmitGid int `yaml:"SubmitGid"`
 	SubmitUid int `yaml:"SubmitUid"`
 
@@ -173,7 +179,6 @@ type Workflow struct {
 	Image           string   `yaml:"image"`
 	Steps           []string `yaml:"steps"`
 	Timeout         int      `yaml:"timeout"`
-	Root            bool     `yaml:"root"`
 	DisableNetwork  bool     `yaml:"disablenetwork"`
 	Show            []int    `yaml:"show"`
 	PrivilegedSteps []int    `yaml:"privilegedsteps"`
@@ -189,6 +194,26 @@ type Workflow struct {
 	// 例：["AllowedCPUs=0-31", "AllowedMemoryNodes=0", "MemoryMax=64G", "CPUQuota=3200%"]
 	// 仅 scope 单元支持的 cgroup/超时类属性可用。若为 nil 则回退到 Config.DefaultProperties。
 	Properties []string `yaml:"properties"`
+
+	// User 控制容器内非特权步骤运行时的身份。
+	// "" 表示 Config.SubmitUid；"root"/"0" 表示容器内 root（也等价于将所有步骤标记为
+	// privileged）；其它为数字 uid（gid 与之相同）。PrivilegedSteps 中列出的步骤
+	// 始终以容器 root 运行，忽略本字段。
+	User string `yaml:"user"`
+
+	// 安全配置（在 apptainer instance start 时一次性生效，所有步骤共享同一信封）。
+	// NoPrivs 等价 apptainer --no-privs（丢弃所有 cap + 设置 NoNewPrivs）。
+	// AddCaps 在 DropCaps/NoPrivs 之后追加回来；evaluator 在存在非特权步骤时会自动
+	// 把 CAP_SETUID/CAP_SETGID 追加进来，否则容器内 setpriv 无法切 uid。
+	NoPrivs   bool     `yaml:"noprivs"`
+	KeepPrivs bool     `yaml:"keepprivs"`
+	DropCaps  []string `yaml:"dropcaps"`
+	AddCaps   []string `yaml:"addcaps"`
+
+	// Seccomp 指向宿主机上的 OCI 格式 seccomp profile（JSON）。""时回退到
+	// Config.DefaultSeccomp；NoSeccomp=true 时显式禁用默认 profile。
+	Seccomp   string `yaml:"seccomp"`
+	NoSeccomp bool   `yaml:"noseccomp"`
 }
 
 // Mount 挂载定义

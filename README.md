@@ -6,8 +6,12 @@ for timeout enforcement. Users connect over SSH to submit, list, and inspect
 their submissions; a separate HTTP API exposes rank and submission data.
 
 This document walks through a single-machine setup using a local SIF image and
-a shell-based demo problem, plus the configuration knobs introduced for sandbox
-hardening (read-only rootfs, configurable path masking).
+a shell-based demo problem, plus the configuration knobs for sandbox hardening:
+read-only rootfs, path masking, per-workflow capability dropping, and a
+default-on seccomp filter that blocks known LPE syscall surfaces (io_uring,
+AF_ALG, `unshare(CLONE_NEWUSER)`, keyctl, bpf, perf_event_open, vmsplice,
+module load, etc.). See **[Sandbox security model](#sandbox-security-model)**
+for the full picture.
 
 ---
 
@@ -41,7 +45,14 @@ SubmitWorkDir/<submitID>/
 ## Prerequisites
 
 - Linux with `systemd` running (scope units are used for timeouts)
-- `apptainer` (tested with 1.5.0) — must be runnable rootless
+- `apptainer` (tested with 1.5.0) — **must be built with libseccomp support**
+  (`apptainer --version` should mention seccomp). Without it, `--security
+  seccomp:…` is silently a no-op and the default profile won't be applied.
+- `setpriv` (util-linux ≥ 2.34) **must be present inside every container image
+  used by SOJ** — it's how each non-privileged step drops uid inside the
+  container. Debian, Alpine, Arch base images already ship it; minimal /
+  distroless / scratch images do **not** and will fail with `exec: setpriv:
+  not found`.
 - `go` 1.21+ for building
 - `docker` only needed if you want to build subsystem images via Dockerfile;
   otherwise plain `go build` + an Apptainer def file is enough
@@ -105,7 +116,24 @@ EOF
 apptainer build --fakeroot /tmp/soj-sftp.sif /tmp/soj-sftp.def
 ```
 
-### 6. Pre-pull the judge base image
+### 6. Install the default seccomp profile
+
+The repo ships an OCI seccomp profile at `seccomp/soj-default.json` that
+blocks io_uring, AF_ALG sockets, `unshare(CLONE_NEWUSER)`, `keyctl`, `bpf`,
+`perf_event_open`, kernel module / kexec syscalls, `mount` family, swap,
+quotactl, and `vmsplice`. It's enabled by default via `DefaultSeccomp` (see
+step 7) — install it once:
+
+```bash
+sudo mkdir -p /var/lib/soj/seccomp
+sudo install -m 0644 seccomp/soj-default.json /var/lib/soj/seccomp/
+```
+
+You can point `DefaultSeccomp` elsewhere if you want to ship a stricter or
+looser policy; see the [Sandbox security model](#sandbox-security-model)
+section for the full list of denied syscalls and how to override per workflow.
+
+### 7. Pre-pull the judge base image
 
 The demo problem uses Debian. Pull once so the first submission isn't slow:
 
@@ -113,7 +141,7 @@ The demo problem uses Debian. Pull once so the first submission isn't slow:
 apptainer pull /tmp/debian.sif docker://debian:latest
 ```
 
-### 7. Write `config.yaml`
+### 8. Write `config.yaml`
 
 Place `config.yaml` next to the `soj` binary. Fill in your own SSH pubkey
 (the one you'll ssh with) and the judge UID/GID from step 1:
@@ -162,9 +190,16 @@ DefaultMaskDirs:
   - /proc/scsi
   - /sys/firmware
   - /sys/kernel/debug
+
+# Security envelope defaults — applied to every workflow unless overridden.
+# See "Sandbox security model" for the full table.
+DefaultNoPrivs: true                               # apptainer --no-privs
+DefaultDropCaps: []                                # extra caps to drop (uppercase)
+DefaultAddCaps: []                                 # extra caps to add back (additive)
+DefaultSeccomp: /var/lib/soj/seccomp/soj-default.json   # "" disables
 ```
 
-### 8. Write the demo problem
+### 9. Write the demo problem
 
 `/data/soj/problems/hello.yaml`:
 
@@ -191,7 +226,7 @@ workflow:
     mask: true
 ```
 
-### 9. Start SOJ
+### 10. Start SOJ
 
 `soj` needs to `chown` per-submission directories into the judge UID, so it
 runs as root:
@@ -200,7 +235,7 @@ runs as root:
 sudo ./soj
 ```
 
-### 10. Upload via SFTP and submit
+### 11. Upload via SFTP and submit
 
 In another terminal, drive the same path real users do: upload the file
 through the SFTP subsystem with `scp`, then trigger the judge with
@@ -255,6 +290,11 @@ followed by another `submit` to see the wrong-answer path.
 | `Admins` | Usernames with admin commands |
 | `DefaultMaskFiles` | Paths masked with `/dev/null` when a workflow sets `mask: true` and doesn't override `maskfiles` |
 | `DefaultMaskDirs` | Paths masked with an empty directory under the same conditions |
+| `DefaultProperties` | `systemd-run --property=` strings applied to every step when the workflow doesn't set its own `properties:` (cgroup/timeout-shaped values only) |
+| `DefaultNoPrivs` | If true, every workflow runs with `apptainer --no-privs` (drop all caps + set NoNewPrivs). Recommended **true**. See [security model](#sandbox-security-model). |
+| `DefaultDropCaps` | Extra `--drop-caps` applied to every workflow when the workflow doesn't set its own `dropcaps:`. Combine with `DefaultNoPrivs: false` to drop a narrow list. |
+| `DefaultAddCaps` | `--add-caps` applied to every workflow. **Additive**: workflow `addcaps:` is appended on top, not a replacement. Keep this `[]` unless every workflow truly needs the same cap. |
+| `DefaultSeccomp` | Host path to an OCI seccomp JSON applied to every workflow. `""` disables. Recommended: ship `seccomp/soj-default.json` to `/var/lib/soj/seccomp/`. |
 
 ### Problem YAML
 
@@ -271,20 +311,34 @@ workflow:                   # one or more stages, run sequentially
     steps:                  # shell commands; each runs in a fresh systemd scope
       - "..."
     timeout: 15             # per-step timeout in seconds
-    root: false             # if true, exec as uid 0 inside the container
     disablenetwork: true
     networkhostmode: false  # ignored when disablenetwork is true
     show: [1, 2]            # 1-indexed step numbers whose output streams to the user
-    privilegedsteps: []     # 1-indexed steps that run with elevated privileges
     mounts:                 # extra bind mounts on top of /submits, /work, /result
       - type: bind
         source: /host/path
         target: /container/path
         readonly: true
+    properties: []          # systemd-run --property=… overrides; see DefaultProperties
     mask: true              # see masking section below
     maskfiles: []           # optional override (empty = use DefaultMaskFiles)
     maskdirs: []
+
+    # --- security envelope (see "Sandbox security model" for the full table) ---
+    user: ""                # "" = SubmitUid; "root"/"0" = container root; "<n>" = numeric uid (n>0)
+    privilegedsteps: []     # 1-indexed step numbers that skip the setpriv uid-drop
+    noprivs: true           # apptainer --no-privs (overrides DefaultNoPrivs upward only)
+    keepprivs: false        # apptainer --keep-privs; mutually exclusive with noprivs
+    dropcaps: []            # nil ⇒ fall back to DefaultDropCaps; explicit [] ⇒ drop nothing
+    addcaps: []             # ADDITIVE on top of DefaultAddCaps
+    seccomp: ""             # "" ⇒ DefaultSeccomp; explicit path overrides
+    noseccomp: false        # set true to disable the default profile entirely for this workflow
 ```
+
+> **Migration**: the old `root: true` field is gone. Replace with `user: "root"` (or
+> equivalently `user: "0"`). Unknown YAML fields are silently ignored by
+> `yaml.v3`, so an unmigrated workflow will quietly downgrade to running as
+> `SubmitUid`.
 
 The final step (in the last workflow) must leave a `result.json` in `/result/`:
 
@@ -336,6 +390,227 @@ are not driven by YAML today:
 | `--net --network=none` | When `disablenetwork: true` |
 | Timeout per step | `systemd-run --scope --property=RuntimeMaxSec=<timeout>` |
 | Username validation | Only `[A-Za-z0-9_-]{1,64}` allowed for SFTP sessions |
+| In-container uid drop | `setpriv --reuid=<uid> --regid=<gid> --clear-groups --` wraps every non-privileged step |
+| Auto-added caps | `CAP_SETUID` + `CAP_SETGID` injected into `--add-caps` whenever a workflow has any non-privileged step with `uid > 0` — required for the setpriv uid drop to succeed |
+
+---
+
+## Sandbox security model
+
+### Threat model
+
+A SOJ submission is *untrusted user code* running as root-by-default inside an
+Apptainer container. Without the layers below, the kernel attack surface
+exposed to that code includes io_uring, AF_ALG crypto sockets,
+`unshare(CLONE_NEWUSER)`, keyrings, `bpf(2)`, `perf_event_open(2)`, kernel
+module loading, kexec, and the `mount` / `swap` / `quotactl` family — all
+historically reachable LPE primitives.
+
+SOJ's defense is three concentric layers, plus a host-level prerequisite:
+
+1. **Kernel-level filter (seccomp)** — `--security seccomp:<profile>` at
+   `apptainer instance start`. Default profile is `seccomp/soj-default.json`,
+   denying the syscalls above. Applies to every process the container ever
+   spawns, including via `apptainer exec`.
+2. **Capability bound (apptainer `--no-privs` + `--add-caps`)** — drops all
+   Linux capabilities at instance start, then adds back only what the
+   workflow declares plus what setpriv needs.
+3. **In-container uid drop (`setpriv`)** — each non-privileged step is wrapped
+   in `setpriv --reuid=<uid> --regid=<gid> --clear-groups --` so the user
+   workload runs as `SubmitUid`, not container-root, **with zero capabilities
+   in its effective/permitted/inheritable sets** (uid 0→non-0 transition
+   wipes those by default).
+4. **Host-level closure** — seccomp cannot inspect pointer arguments, so
+   `clone3(CLONE_NEWUSER)` is **not filterable** at our layer (see the
+   seccomp profile section for the long story). The host must set
+   `kernel.unprivileged_userns_clone = 0` to close that gap; see
+   [Recommended host-level hardening](#recommended-host-level-hardening-operator)
+   for the full sysctl + modprobe list.
+
+### Execution model — what actually happens per step
+
+```
+host (root)
+  └─> apptainer instance start
+        --no-privs                    ← drop caps + NoNewPrivs
+        --add-caps CAP_SETUID,CAP_SETGID,<workflow.addcaps>
+        --security seccomp:/path
+        … bind mounts / mask binds / image / instance name
+
+  └─> for each step:
+        systemd-run --scope --property=RuntimeMaxSec=<timeout> ...
+          apptainer exec --pwd /work instance://<name>
+            [setpriv --reuid=<uid> --regid=<gid> --clear-groups --]   # skipped if privileged
+              sh -c "<step command>"
+```
+
+Important consequence: **`addcaps` does not survive the setpriv uid drop**.
+A workflow with `noprivs: true, addcaps: [CAP_SYS_NICE]` and non-privileged
+steps gives the *step command* zero effective capabilities — the cap was
+present only during the brief root window before setpriv ran. If the workload
+genuinely needs CAP_SYS_NICE, either (a) mark the step `privilegedsteps:` to
+skip setpriv (it then runs as container-root with the cap), or (b) rely on
+cgroup constraints (`AllowedCPUs=`, `AllowedMemoryNodes=`) which bind the
+default-allow set for `sched_setaffinity` / `mbind` without needing the cap.
+
+### Default seccomp profile (`seccomp/soj-default.json`)
+
+`defaultAction: SCMP_ACT_ALLOW` with `SCMP_ACT_ERRNO` rules on:
+
+| Group | Syscalls |
+|---|---|
+| io_uring | `io_uring_setup` (425), `io_uring_enter` (426), `io_uring_register` (427) |
+| Keyring | `add_key`, `request_key`, `keyctl` |
+| Tracing | `bpf`, `perf_event_open` |
+| Module / kexec | `init_module`, `finit_module`, `delete_module`, `kexec_load`, `kexec_file_load` |
+| Mount family | `pivot_root`, `mount`, `umount`, `umount2`, `move_mount`, `open_tree`, `fsopen`, `fsmount`, `fsconfig`, `fspick`, `swapon`, `swapoff`, `quotactl`, `quotactl_fd`, `nfsservctl` |
+| Page-cache LPE | `vmsplice` |
+| User namespace | `unshare` / `clone` / `setns` when arg has `CLONE_NEWUSER` bit set |
+| Crypto socket | `socket(AF_ALG, …)` (family=38) |
+| Network bypass | `socket(AF_XDP, …)` (family=44) |
+
+Explicitly allowed (not in any deny rule, picked up by the default-allow
+action): `sched_setaffinity`, `sched_getaffinity`, `getcpu`, `set_mempolicy`,
+`get_mempolicy`, `mbind`, `setresuid`, `setresgid`, `setgroups` — i.e.
+everything `numactl` and `setpriv` need.
+
+> **Why `clone3` is not filtered.** Earlier drafts of this profile returned
+> ENOSYS for `clone3` so that glibc would fall back to `clone(2)` (which we
+> filter on the `CLONE_NEWUSER` bit). glibc ≥ 2.37 removed that fallback and
+> calls `clone3` unconditionally for `pthread_create`, so an `ENOSYS` rule
+> breaks the apptainer starter binary on any recent host (Manjaro, Arch,
+> Fedora 38+, Debian trixie). `clone3`'s flag argument lives in a pointed-to
+> `clone_args` struct, which seccomp cannot inspect — so the only useful
+> options are "allow" or "deny outright"; allow is what we ship. To close
+> the resulting user-namespace gap, apply the host sysctl listed below.
+
+The profile is JSON in OCI runtime-spec format; you can edit
+`/var/lib/soj/seccomp/soj-default.json` directly or point `DefaultSeccomp` at
+a different file.
+
+### Recommended host-level hardening (operator)
+
+These sysctls and module blacklists complement the per-container envelope and
+close gaps that seccomp cannot reach from inside the container. Apply them on
+the SOJ host:
+
+```bash
+# /etc/sysctl.d/99-soj-hardening.conf
+kernel.unprivileged_userns_clone = 0   # blocks unprivileged userns creation
+                                        # even via clone3(CLONE_NEWUSER) which
+                                        # we cannot filter at seccomp's layer
+kernel.io_uring_disabled         = 2   # belt + suspenders for the io_uring
+                                        # syscall filter (the kernel build
+                                        # may have CONFIG_IO_URING=y)
+kernel.kptr_restrict             = 2
+kernel.dmesg_restrict            = 1
+kernel.unprivileged_bpf_disabled = 1
+```
+
+```bash
+# /etc/modprobe.d/soj-hardening.conf — block crypto-socket attack surface
+# even if CAP_SYS_MODULE is somehow reachable
+install af_alg          /bin/false
+install algif_hash      /bin/false
+install algif_skcipher  /bin/false
+install algif_aead      /bin/false
+install algif_rng       /bin/false
+install xfrm_user       /bin/false
+```
+
+Apply with `sudo sysctl --system` and `sudo update-initramfs -u` (or your
+distro's equivalent), then reboot. These are out of SOJ's reach — the
+sandbox can only filter what the kernel is willing to filter.
+
+### Per-workflow field reference
+
+Each field below independently overrides (or augments) a default. The
+"interaction with default" column says what `""` / `nil` / `false` means in
+that field.
+
+| Field | Type | Meaning | Interaction with default |
+|---|---|---|---|
+| `user` | string | Effective uid inside the container for non-privileged steps. `""` ⇒ `SubmitUid`; `"root"` or `"0"` ⇒ uid 0 (skips setpriv globally); `"<n>"` ⇒ numeric uid (must be `>0`). | No global default; always falls back to `SubmitUid`. |
+| `privilegedsteps` | `[]int` (1-indexed) | Steps in this list skip the setpriv wrapper, running as container-root. Useful for prep/cleanup that must touch root-owned paths. | No default. |
+| `noprivs` | bool | Adds `--no-privs` to instance start (drop all caps + NoNewPrivs). | OR'd with `DefaultNoPrivs` — workflow can only add, not remove. To remove, use `keepprivs: true`. |
+| `keepprivs` | bool | Adds `--keep-privs`, retaining root's full capability set. Use only for trusted infrastructure workflows. | Mutually exclusive with `noprivs`; if both end up true, behavior is apptainer-version-dependent — avoid. |
+| `dropcaps` | `[]string` | `apptainer --drop-caps CAP_FOO,CAP_BAR,…`. Cap names are case-insensitive, with or without the `CAP_` prefix. | `nil` ⇒ fall back to `DefaultDropCaps`. Explicit `[]` ⇒ drop nothing extra. |
+| `addcaps` | `[]string` | `apptainer --add-caps …`. Caps survive only for *privileged* steps; non-privileged steps lose them at the setpriv uid drop (see above). | **Additive on top of `DefaultAddCaps`** — not a replacement. |
+| `seccomp` | string | Host path to OCI seccomp JSON. | `""` ⇒ fall back to `DefaultSeccomp` unless `noseccomp: true`. |
+| `noseccomp` | bool | Disables the default seccomp profile entirely for this workflow (does not affect an explicit `seccomp:` path). | Default false. |
+
+### Recommended recipes
+
+**Locked-down student code (default):** rely on platform defaults — students
+just write `workflow:` entries with no security knobs.
+
+```yaml
+workflow:
+  - image: …
+    timeout: …
+    mask: true
+    # nothing else — picks up DefaultNoPrivs + DefaultSeccomp + SubmitUid
+```
+
+**Numactl / NUMA pinning workload (proj3 style):** lock everything down, let
+the cgroup bound numactl rather than handing it CAP_SYS_NICE.
+
+```yaml
+workflow:
+  - image: …
+    noprivs: true                    # belt: drop all caps
+    properties:                      # suspenders: cgroup pins the affinity set
+      - "AllowedCPUs=0-7"
+      - "AllowedMemoryNodes=0"
+      - "MemoryMax=4G"
+      - "CPUQuota=800%"
+    # no addcaps: CAP_SYS_NICE wouldn't survive setpriv anyway; cgroup is
+    # what actually keeps the binding inside the allowed CPU/node set.
+```
+
+**Trusted post-processing as root (judge writer):** stage / build runs as
+`SubmitUid`, then the trusted scorer step runs as container-root.
+
+```yaml
+workflow:
+  - image: …
+    privilegedsteps: [3]   # step 3 (1-indexed) skips setpriv
+    steps:
+      - "cp /submits/*.c /work/"                           # uid 942
+      - "cd /work && make"                                 # uid 942
+      - "/scaffold/judge.sh /work/output /result/result.json"  # uid 0
+```
+
+**Per-problem cap addition (privileged step needs it):**
+
+```yaml
+workflow:
+  - image: …
+    privilegedsteps: [4]
+    addcaps: [CAP_SYS_PTRACE]   # step 4 (privileged, no setpriv) keeps this cap
+    # non-privileged steps still get the cap injected at instance start, but
+    # lose it at the setpriv uid drop. It's effectively step-4-only.
+```
+
+**Per-problem seccomp override (e.g. a problem that needs `unshare`):**
+
+```yaml
+workflow:
+  - image: …
+    seccomp: /var/lib/soj/seccomp/permissive-unshare.json
+    # or, to disable seccomp entirely for one workflow:
+    # noseccomp: true
+```
+
+### Why `addcaps` does not "just work"
+
+The Linux capability model wipes a process's permitted / effective /
+inheritable sets when it transitions from uid 0 to a non-zero uid (unless
+`SECBIT_KEEP_CAPS` or `--ambient-caps` is set). SOJ's setpriv invocation does
+neither, so capabilities added at apptainer instance start are visible to the
+*pre-setpriv* root shim only. If a future change wires `setpriv
+--ambient-caps`, AddCaps will carry through to the workload — until then,
+treat AddCaps as a privileged-step-only mechanism.
 
 ---
 
@@ -382,7 +657,7 @@ apptainer instance stop --all   # add `sudo` if any were started as root
 # Remove all runtime data (DB, submissions, work dirs, problems)
 sudo rm -rf /data/soj
 
-# Remove the masked-paths source dir
+# Remove the masked-paths source dir and the installed seccomp profile
 sudo rm -rf /var/lib/soj
 
 # Remove pre-built images and keys
@@ -412,6 +687,12 @@ owned by root — clean those with `sudo`.
 | `failed to read result file` | The last workflow step didn't write `/result/result.json` |
 | `rejected sftp session: invalid username` | Username contains characters outside `[A-Za-z0-9_-]` — required to avoid argument injection into `apptainer` |
 | Submissions stuck at `dead` | A previous SOJ run crashed mid-judge. Status is rewritten to `dead` at startup; submit again |
+| `exec: setpriv: not found` or step exits 127 immediately | Container image lacks `setpriv` (util-linux). Rebuild the image with `util-linux` installed, or mark the affected step `privilegedsteps: [<n>]` to skip setpriv |
+| `setpriv: setresuid: Operation not permitted` | `noprivs: true` was applied but `CAP_SETUID/CAP_SETGID` are missing from the bounding set. The evaluator auto-adds them — if you see this, check that the workflow's `dropcaps:` isn't dropping them again, and that no host-level seccomp or AppArmor profile is interfering |
+| `seccomp profile applied but workload still uses io_uring` | `apptainer --version` doesn't mention seccomp — apptainer was built without libseccomp and `--security seccomp:` is silently ignored. Rebuild apptainer with seccomp support |
+| `apptainer instance start failed: invalid argument: --security seccomp:…` | `DefaultSeccomp` points at a missing or malformed JSON. Validate with `python3 -m json.tool /var/lib/soj/seccomp/soj-default.json` |
+| `runtime/cgo: pthread_create failed: Operation not permitted` then segfault | The seccomp profile is filtering `clone3` (e.g. returning ENOSYS). glibc ≥ 2.37 no longer falls back to `clone(2)` and the apptainer starter dies. Remove any `clone3` rule from the profile; rely on `kernel.unprivileged_userns_clone = 0` at the host level instead |
+| Old workflow `root: true` is silently ignored | The field was removed; use `user: "root"` (or `user: "0"`). yaml.v3 doesn't error on unknown fields |
 
 ---
 

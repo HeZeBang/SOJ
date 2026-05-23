@@ -10,14 +10,15 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/mrhaoxx/SOJ/file_transfer"
 	"github.com/mrhaoxx/SOJ/types"
 	"github.com/pkg/errors"
 
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/rs/zerolog/log"
-
 )
 
 // Evaluator 评测器
@@ -29,9 +30,9 @@ type Evaluator struct {
 
 // SandboxInterface 沙箱接口
 type SandboxInterface interface {
-	RunImage(name string, user string, hostname string, image string, workdir string, mounts []types.Mount, maskFiles []string, maskDirs []string, ReadonlyRootfs bool, networkdisabled bool, timeout int, networkhosted bool, env []string) (ok bool, id string)
+	RunImage(opts file_transfer.RunImageOpts) (ok bool, id string)
 	CleanContainer(id string)
-	ExecContainer(id string, cmd string, timeout int, stdin io.Reader, stdout, stderr io.Writer, env []string, privileged bool, properties []string) (int, string, error)
+	ExecContainer(id string, opts file_transfer.ExecOpts) (int, string, error)
 	GetContainerLogs(id string) (string, error)
 }
 
@@ -214,9 +215,18 @@ workdir_created:
 			stepprivillege[step] = struct{}{}
 		}
 
-		var usr = strconv.Itoa(e.cfg.SubmitUid)
-		if workflow.Root {
-			usr = "0"
+		uid, gid := e.cfg.SubmitUid, e.cfg.SubmitGid
+		switch workflow.User {
+		case "":
+			// 默认走 cfg.SubmitUid
+		case "root", "0":
+			uid, gid = 0, 0
+		default:
+			if n, perr := strconv.Atoi(workflow.User); perr == nil {
+				uid, gid = n, n
+			} else {
+				log.Warn().Str("user", workflow.User).Msg("workflow.user 不是合法 uid，回退到 SubmitUid")
+			}
 		}
 
 		// Resolve mask paths: workflow overrides global defaults; if workflow.Mask is false, no masking.
@@ -234,7 +244,46 @@ workdir_created:
 			}
 		}
 
-		ok, cid := e.sandbox.RunImage("soj-judge-"+ctx.ID+"-"+strconv.Itoa(idx+1), usr, "soj-judgement", workflow.Image, "/work", _mount, maskFiles, maskDirs, true, workflow.DisableNetwork, workflow.Timeout, workflow.NetworkHostMode, envs)
+		// 安全信封：workflow 字段覆盖 Config 默认；AddCaps 在默认之上追加。
+		noPrivs := workflow.NoPrivs || e.cfg.DefaultNoPrivs
+		dropCaps := workflow.DropCaps
+		if dropCaps == nil {
+			dropCaps = e.cfg.DefaultDropCaps
+		}
+		addCaps := append([]string{}, e.cfg.DefaultAddCaps...)
+		addCaps = append(addCaps, workflow.AddCaps...)
+
+		// 当 uid != 0 且至少一个步骤是非特权时，容器内需要用 setpriv 降权，
+		// 这要求 NoPrivs 之后仍然保留 CAP_SETUID / CAP_SETGID。
+		hasNonPrivStep := uid != 0 && len(workflow.PrivilegedSteps) < len(workflow.Steps)
+		if hasNonPrivStep {
+			addCaps = appendUniqueCap(addCaps, "CAP_SETUID", "CAP_SETGID")
+		}
+
+		seccomp := workflow.Seccomp
+		if seccomp == "" && !workflow.NoSeccomp {
+			seccomp = e.cfg.DefaultSeccomp
+		}
+
+		ok, cid := e.sandbox.RunImage(file_transfer.RunImageOpts{
+			Name:            "soj-judge-" + ctx.ID + "-" + strconv.Itoa(idx+1),
+			Hostname:        "soj-judgement",
+			Image:           workflow.Image,
+			Workdir:         "/work",
+			Mounts:          _mount,
+			MaskFiles:       maskFiles,
+			MaskDirs:        maskDirs,
+			ReadonlyRootfs:  true,
+			NetworkDisabled: workflow.DisableNetwork,
+			NetworkHosted:   workflow.NetworkHostMode,
+			Timeout:         workflow.Timeout,
+			Env:             envs,
+			NoPrivs:         noPrivs,
+			KeepPrivs:       workflow.KeepPrivs,
+			DropCaps:        dropCaps,
+			AddCaps:         addCaps,
+			Seccomp:         seccomp,
+		})
 
 		if !ok {
 			ctx.SetStatus("failed").SetMsg("failed to run judge container")
@@ -267,7 +316,18 @@ workdir_created:
 			if props == nil {
 				props = e.cfg.DefaultProperties
 			}
-			ec, logs, err := e.sandbox.ExecContainer(cid, step, workflow.Timeout, nil, rr, re, envs, priv, props)
+			ec, logs, err := e.sandbox.ExecContainer(cid, file_transfer.ExecOpts{
+				Cmd:        step,
+				Timeout:    workflow.Timeout,
+				Stdin:      nil,
+				Stdout:     rr,
+				Stderr:     re,
+				Env:        envs,
+				Properties: props,
+				UID:        uid,
+				GID:        gid,
+				Privileged: priv,
+			})
 
 			if ok {
 				ctx.Userface.Println(aurora.Gray(15, "exit code:"), aurora.Yellow(ec))
@@ -396,4 +456,20 @@ type ColoredIO struct {
 func (c *ColoredIO) Write(p []byte) (n int, err error) {
 	_, err = c.Writer.Write([]byte(aurora.Colorize(string(p), c.Color).String()))
 	return len(p), err
+}
+
+// appendUniqueCap 把 want 中尚未出现在 caps 里的能力名追加进去（大小写不敏感比较）。
+func appendUniqueCap(caps []string, want ...string) []string {
+	have := make(map[string]struct{}, len(caps))
+	for _, c := range caps {
+		have[strings.ToUpper(c)] = struct{}{}
+	}
+	for _, w := range want {
+		if _, ok := have[strings.ToUpper(w)]; ok {
+			continue
+		}
+		caps = append(caps, w)
+		have[strings.ToUpper(w)] = struct{}{}
+	}
+	return caps
 }
