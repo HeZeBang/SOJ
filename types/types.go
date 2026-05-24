@@ -286,6 +286,10 @@ func ColorizeStatus(status string) aurora.Value {
 	switch status {
 	case "init":
 		return aurora.Gray(10, status)
+	case "queued":
+		return aurora.Cyan(status)
+	case "running":
+		return aurora.Yellow(status)
 	case "prep_dirs":
 		return aurora.Yellow(status)
 	case "prep_files":

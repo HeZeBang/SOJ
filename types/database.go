@@ -27,8 +27,11 @@ func NewDatabaseService(cfg *Config) (*DatabaseService, error) {
 	db.AutoMigrate(&SubmitCtx{})
 	db.AutoMigrate(&User{})
 
-	// 清理未完成的提交
-	db.Model(&SubmitCtx{}).Where("status != ? AND status != ? AND status != ?", "completed", "dead", "failed").Update("status", "dead")
+	// queued submissions are recovered by the scheduler after startup. Any
+	// other non-terminal status belonged to a process that was interrupted.
+	db.Model(&SubmitCtx{}).
+		Where("status NOT IN ?", []string{"completed", "dead", "failed", "queued"}).
+		Updates(map[string]interface{}{"status": "dead", "msg": "judge process stopped before completion"})
 
 	return &DatabaseService{
 		db:  db,
@@ -235,6 +238,36 @@ func (ds *DatabaseService) GetSubmitByID(submitID string) (*SubmitCtx, error) {
 		return nil, result.Error
 	}
 	return &submit, nil
+}
+
+// GetQueuedSubmits returns queued submissions in FIFO order for scheduler recovery.
+func (ds *DatabaseService) GetQueuedSubmits() ([]SubmitCtx, error) {
+	var submits []SubmitCtx
+	result := ds.db.Where("status = ?", "queued").
+		Order("submit_time asc").
+		Find(&submits)
+	return submits, result.Error
+}
+
+// CountSubmitsAhead returns queued submissions older than submitTime plus any
+// currently-active judge status.
+func (ds *DatabaseService) CountSubmitsAhead(submitTime int64) (int64, error) {
+	var queued int64
+	if err := ds.db.Model(&SubmitCtx{}).
+		Where("status = ? AND submit_time < ?", "queued", submitTime).
+		Count(&queued).Error; err != nil {
+		return 0, err
+	}
+
+	var active int64
+	activeStatuses := []string{"running", "prep_dirs", "prep_files", "run_workflow", "collect_result"}
+	if err := ds.db.Model(&SubmitCtx{}).
+		Where("status IN ? OR status LIKE ?", activeStatuses, "run_workflow-%").
+		Count(&active).Error; err != nil {
+		return 0, err
+	}
+
+	return queued + active, nil
 }
 
 // GetSubmitsByUser 获取用户的提交记录（分页）

@@ -766,13 +766,34 @@ Common commands:
 
 | Command | Aliases | Purpose |
 |---|---|---|
-| `submit <problem_id>` | `sub` | Submit and run the judge workflow |
+| `submit <problem_id>` | `sub` | Submit to the exclusive judge queue |
+| `attach <submit_id>` | `at` | Watch a queued or running submission |
 | `list [page]` | `ls` | List your submissions |
 | `status <submit_id>` | `st` | Show one submission in detail |
 | `describe [problem_id]` | `desc` | With no arg: list all problem IDs. With one: show id, text, and required submits |
 | `my` | | Your best scores per problem |
 | `rank` | `rk` | Leaderboard; scores show `(tag)` suffix when available (e.g. `90.00 (6.00x)`) |
 | `token` | | Token cookie for the HTTP API |
+
+### Exclusive judge queue
+
+The current build enables an **exclusive** scheduler by default: only one
+submission is judged at a time.
+
+- `submit <problem_id>` now creates the submission first, returns a submission
+  ID immediately, and places it into the exclusive queue.
+- If the queue is empty, the same SSH session continues to stream live judge
+  logs.
+- If another submission is already running or waiting, SOJ prints the queue
+  position and exits; judging still continues in the background.
+- `attach <submit_id>` re-attaches to a queued or running submission and replays
+  buffered logs before following new output.
+- `status <submit_id>` may now show `queued`, `running`, or a more specific
+  phase such as `prep_files` / `run_workflow-0`.
+
+There is currently nothing extra to configure to "turn on" exclusive mode:
+starting this version of SOJ automatically starts the single-worker scheduler
+and recovers any persisted `queued` submissions on restart.
 
 SFTP is also exposed as a subsystem (`sftp -P 2222 <user>@<host>`) and lands the
 user in `/work` inside the SFTP container, which is `SubmitsDir/<user>` on the

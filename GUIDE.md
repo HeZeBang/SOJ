@@ -115,7 +115,16 @@ Once you have prepared all the files, you can submit them. Submitting will not c
 ssh oj submit <problem>
 ```
 
-This will create an SSH session providing streaming logs. Closing this SSH connection will not affect the judging process. You can obtain the evaluation logs through [Get Submission Status](#get-submission-status), which are identical to the streaming logs.
+The submission is first placed in the exclusive judge queue and gets a submission ID immediately. If no other submission is running, the session follows the live judge logs. If another submission is ahead of it, SOJ prints the queue position and exits. Closing the SSH connection or pressing Ctrl+C only detaches from the log stream; it does not cancel judging.
+
+To continue watching a queued or running submission, use:
+
+```shell
+ssh oj attach <ID>
+```
+
+> [!TIP]
+> `attach` = `at`
 
 ## View Submission List
 
@@ -143,6 +152,8 @@ ssh oj status <ID>
 ```
 
 to get detailed information about this submission.
+
+Queued submissions show `queued`; running submissions may show `running` or a detailed judge phase such as `prep_files` or `run_workflow-0`.
 
 > [!TIP]
 > `status` = `st`

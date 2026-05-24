@@ -597,13 +597,26 @@ SOJ 运行后，`ssh -p 2222 <user>@<host>` 打开交互式会话。常用命令
 
 | 命令 | 别名 | 用途 |
 |---|---|---|
-| `submit <problem_id>` | `sub` | 提交并运行评测 workflow |
+| `submit <problem_id>` | `sub` | 提交到 exclusive 评测队列 |
+| `attach <submit_id>` | `at` | 观察排队中或运行中的提交 |
 | `list [page]` | `ls` | 列出你的提交 |
 | `status <submit_id>` | `st` | 显示单个提交详情 |
 | `describe [problem_id]` | `desc` | 无参数：列出所有题目 ID。有参数：显示 id、文本和所需提交 |
 | `my` | | 你的每题最高分 |
 | `rank` | `rk` | 排行榜；分数后附带 `(tag)` 后缀（如 `90.00 (6.00x)`） |
 | `token` | | HTTP API 的 Token cookie |
+
+### exclusive 评测队列
+
+当前版本默认启用 **exclusive** 调度：同一时间只会有一个提交进入实际评测。
+
+- `submit <problem_id>` 现在会先创建提交、立即返回提交 ID，然后放入 exclusive 队列。
+- 如果队列为空，当前 SSH 会话会继续输出实时评测日志。
+- 如果已有提交正在运行或排队，SOJ 会显示前方排队数量后退出；评测仍会在后台继续。
+- `attach <submit_id>` 可以重新连接到排队中或运行中的提交，并先回放已缓存日志，再继续跟随新输出。
+- `status <submit_id>` 现在可能显示 `queued`、`running`，或更具体的阶段，如 `prep_files` / `run_workflow-0`。
+
+目前不需要额外配置来“开启” exclusive 模式：启动这个版本的 SOJ 时会自动启用单 worker 调度器，并在重启后恢复数据库中仍处于 `queued` 的提交。
 
 SFTP 也作为子系统暴露（`sftp -P 2222 <user>@<host>`），用户进入 SFTP 容器内的 `/work`，对应宿主机上的 `SubmitsDir/<user>`。
 

@@ -99,6 +99,10 @@ func main() {
 
 	// 初始化评测器
 	evaluator := judge.NewEvaluator(&cfg, sandboxService, dbService)
+	scheduler := judge.NewScheduler(&cfg, dbService, evaluator, problems)
+	if err := scheduler.RecoverQueued(); err != nil {
+		log.Fatal().Err(err).Msg("failed to recover queued submissions")
+	}
 
 	// 初始化HTTP服务器
 	httpServer := ui.NewHTTPServer(dbService)
@@ -111,10 +115,12 @@ func main() {
 	s := &ssh.Server{
 		Addr: cfg.ListenAddr,
 		Handler: func(s ssh.Session) {
-			// 处理特殊的submit命令
+			// 处理需要调度器参与的命令
 			cmds := s.Command()
-			if len(cmds) >= 2 && (cmds[0] == "submit" || cmds[0] == "sub") {
-				handleSubmit(s, &cfg, evaluator, problemManager, dbService, cmds)
+			if len(cmds) >= 1 && (cmds[0] == "submit" || cmds[0] == "sub") {
+				handleSubmit(s, &cfg, scheduler, problemManager, dbService, cmds)
+			} else if len(cmds) >= 1 && (cmds[0] == "attach" || cmds[0] == "at") {
+				handleAttach(s, scheduler, dbService, cmds)
 			} else {
 				sshHandler.HandleSession(s)
 			}
@@ -136,7 +142,7 @@ func main() {
 }
 
 // handleSubmit 处理提交命令
-func handleSubmit(s ssh.Session, cfg *types.Config, evaluator *judge.Evaluator, problemManager *judge.ProblemManager, dbService *types.DatabaseService, cmds []string) {
+func handleSubmit(s ssh.Session, cfg *types.Config, scheduler *judge.Scheduler, problemManager *judge.ProblemManager, dbService *types.DatabaseService, cmds []string) {
 	uf := types.Userface{
 		Buffer: bytes.NewBuffer(nil),
 		Writer: s,
@@ -169,7 +175,8 @@ func handleSubmit(s ssh.Session, cfg *types.Config, evaluator *judge.Evaluator, 
 
 		SubmitTime: subtime.UnixNano(),
 
-		Status: "init",
+		Status: "queued",
+		Msg:    "waiting for exclusive judge slot",
 
 		SubmitDir: path.Join(cfg.SubmitsDir, s.User(), pid),
 		Workdir:   path.Join(cfg.SubmitWorkDir, id),
@@ -183,20 +190,98 @@ func handleSubmit(s ssh.Session, cfg *types.Config, evaluator *judge.Evaluator, 
 		Running: make(chan struct{}),
 	}
 
-	go evaluator.RunJudge(&ctx, &pb)
-
-	<-ctx.Running
-
-	uf.Println("Submit", "is", types.ColorizeStatus(ctx.Status))
-	uf.Println("Message:\n	", aurora.Blue(ctx.Msg))
-
-	writeResult(uf, ctx)
-
-	// 更新用户数据
-	err := dbService.UpdateUserSubmitResult(s.User(), &ctx, &pb)
-	if err != nil {
-		log.Error().Err(err).Str("user", s.User()).Msg("failed to update user submit result")
+	if err := dbService.CreateSubmit(&ctx); err != nil {
+		uf.Println(aurora.Red("error:"), "failed to create submission")
+		log.Error().Err(err).Str("user", s.User()).Str("problem", pid).Msg("failed to create submit")
+		return
 	}
+
+	ahead, err := scheduler.Enqueue(&ctx, pb)
+	if err != nil {
+		uf.Println(aurora.Red("error:"), "failed to enqueue submission")
+		log.Error().Err(err).Str("submit", ctx.ID).Msg("failed to enqueue submit")
+		return
+	}
+
+	uf.Println("Submission ID:", aurora.Magenta(ctx.ID))
+	uf.Println("Status:", types.ColorizeStatus(ctx.Status))
+	if ahead > 0 {
+		uf.Println("Queue ahead:", aurora.Yellow(ahead))
+		uf.Println("Use", aurora.Bold("attach "+ctx.ID), "to watch this submission later")
+		return
+	}
+
+	uf.Println("Starting now. Press Ctrl+C to detach; judging will continue.")
+	if err := scheduler.Attach(ctx.ID, s); err != nil {
+		log.Debug().Err(err).Str("submit", ctx.ID).Msg("submit attach ended")
+		return
+	}
+
+	submit, err := dbService.GetSubmitByID(ctx.ID)
+	if err != nil {
+		log.Error().Err(err).Str("submit", ctx.ID).Msg("failed to reload submit after attach")
+		return
+	}
+	uf.Println("Submit", "is", types.ColorizeStatus(submit.Status))
+	uf.Println("Message:\n	", aurora.Blue(submit.Msg))
+	writeResult(uf, *submit)
+}
+
+// handleAttach 继续观察一个已提交的任务。
+func handleAttach(s ssh.Session, scheduler *judge.Scheduler, dbService *types.DatabaseService, cmds []string) {
+	uf := types.Userface{
+		Buffer: bytes.NewBuffer(nil),
+		Writer: s,
+	}
+
+	uf.Println(aurora.Yellow(time.Now().Format(time.DateTime + " MST")))
+
+	if len(cmds) != 2 {
+		uf.Println(aurora.Red("error:"), "invalid arguments")
+		uf.Println("usage: attach <submit_id>")
+		return
+	}
+
+	submit, err := dbService.FindSubmitsByUserAndPattern(s.User(), cmds[1])
+	if err != nil {
+		uf.Println(aurora.Red("error:"), "submit", aurora.Yellow(strconv.Quote(cmds[1])), "not found")
+		return
+	}
+
+	uf.Println("Attach:", aurora.Magenta(submit.ID))
+	uf.Println("Status:", types.ColorizeStatus(submit.Status))
+
+	switch submit.Status {
+	case "completed", "failed", "dead":
+		uf.Println("Submit", "is", types.ColorizeStatus(submit.Status))
+		uf.Println("Message:\n	", aurora.Blue(submit.Msg))
+		writeResult(uf, *submit)
+		return
+	case "queued":
+		ahead, err := scheduler.QueueAhead(submit)
+		if err != nil {
+			uf.Println(aurora.Red("error:"), "failed to read queue position")
+			return
+		}
+		uf.Println("Queue ahead:", aurora.Yellow(ahead))
+		uf.Println("Waiting. Press Ctrl+C to detach; judging will continue.")
+	default:
+		uf.Println("Following logs. Press Ctrl+C to detach; judging will continue.")
+	}
+
+	if err := scheduler.Attach(submit.ID, s); err != nil {
+		log.Debug().Err(err).Str("submit", submit.ID).Msg("attach ended")
+		return
+	}
+
+	submit, err = dbService.GetSubmitByID(submit.ID)
+	if err != nil {
+		log.Error().Err(err).Str("submit", submit.ID).Msg("failed to reload submit after attach")
+		return
+	}
+	uf.Println("Submit", "is", types.ColorizeStatus(submit.Status))
+	uf.Println("Message:\n	", aurora.Blue(submit.Msg))
+	writeResult(uf, *submit)
 }
 
 // writeResult 写入结果

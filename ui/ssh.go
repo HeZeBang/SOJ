@@ -57,6 +57,7 @@ func (sh *SSHHandler) HandleSession(s ssh.Session) {
 		uf.Println("Welcome to", aurora.Bold("SOJ"), aurora.Gray(aurora.GrayIndex(10), "Secure Online Judge"), ",", aurora.BrightBlue(s.User()))
 		uf.Println(aurora.Yellow(time.Now().Format(time.DateTime + " MST")))
 		uf.Println("Use 'submit", aurora.Gray(15, "(sub)"), "<problem_id>' to submit a problem")
+		uf.Println("Use 'attach", aurora.Gray(15, "(at)"), "<submit_id>' to watch a queued or running submission")
 		uf.Println("Use 'list", aurora.Gray(15, "(ls)"), "[page]' to list your submissions")
 		uf.Println("Use 'status", aurora.Gray(15, "(st)"), "<submit_id>' to show a submission", aurora.Magenta("(fuzzy match)"))
 		uf.Println("Use 'describe", aurora.Gray(15, "(desc)"), "[problem_id]' to list problems or show one in detail")
@@ -491,6 +492,11 @@ func (sh *SSHHandler) showSub(uf types.Userface, submit types.SubmitCtx) {
 	uf.Println("User:", aurora.Blue(submit.User))
 	uf.Println("Problem:", aurora.Bold(submit.Problem))
 	uf.Println("Status:", types.ColorizeStatus(submit.Status))
+	if submit.Status == "queued" {
+		if ahead, err := sh.dbService.CountSubmitsAhead(submit.SubmitTime); err == nil {
+			uf.Println("Queue ahead:", aurora.Yellow(ahead))
+		}
+	}
 	uf.Println("Message:", aurora.Gray(15, submit.Msg))
 	uf.Println("Submit Time:", aurora.Yellow(time.Unix(0, submit.SubmitTime).Format(time.DateTime+" MST")))
 
