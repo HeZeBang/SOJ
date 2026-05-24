@@ -172,12 +172,9 @@ APIAddr:    "0.0.0.0:8080"
 # Mode 1: Single key (original behavior)
 # AllowedSSHPubkey: "ssh-ed25519 AAAA... user@host"
 #
-# Mode 2: GitHub key list — fetch each user's keys from github.com/<user>.keys
+# Mode 2: GitHub keys — SSH username must match a GitHub account key
 # Auth:
 #   Mode: github-list
-#   GitHubUsers:
-#     - "alice"
-#     - "bob"
 #   GitHubToken: "ghp_xxx"           # optional, avoids rate limit
 #   GitHubEndpoint: "https://github.com"  # optional, for GitHub Enterprise
 #   KeyCachePath: "./keys_cache.json"     # optional, key cache file (default ./keys_cache.json)
@@ -313,20 +310,15 @@ This is suitable for single-user setups or testing. **There is no protection
 against username spoofing** — any client that presents the matching key can
 claim any username.
 
-### Mode 2: GitHub key list (`Auth.Mode: github-list`)
+### Mode 2: GitHub keys (`Auth.Mode: github-list`)
 
-SOJ fetches each user's public keys from `https://github.com/<username>.keys`
-at startup. The SSH username **must match** the GitHub username — the client's
-presented key is looked up in the fetched set, and the owning GitHub username
-must equal `ctx.User()`.
+SOJ fetches public keys from `https://github.com/<username>.keys` for the SSH
+username that is trying to log in. The SSH username **must match** the GitHub
+username, and the presented SSH key must be one of that GitHub account's keys.
 
 ```yaml
 Auth:
   Mode: github-list
-  GitHubUsers:
-    - "alice"
-    - "bob"
-    - "charlie"
   GitHubToken: "ghp_xxx"           # optional; avoids 60 req/hr rate limit
   GitHubEndpoint: "https://github.com"  # optional; for GitHub Enterprise
 ```
@@ -336,15 +328,13 @@ Auth:
 1. At startup, SOJ checks for a cached key file (default `./keys_cache.json`,
    configurable via `Auth.KeyCachePath`). If the cache exists and is less than
    24 hours old, keys are loaded from disk — no GitHub fetch occurs.
-2. If the cache is missing or stale, SOJ concurrently fetches keys for all
-   listed users (with a progress bar). Failed fetches are logged as errors but
-   do **not** prevent SOJ from starting — those users simply can't log in until
-   keys are loaded.
+2. If the key is not already cached, SOJ fetches keys for `ctx.User()` during
+   SSH authentication and updates the cache.
 3. Each key is mapped to its GitHub username by SHA256 fingerprint.
 4. On SSH connect, the client's key fingerprint is looked up. If found and the
    owning username matches `ctx.User()`, authentication succeeds.
-5. Admins can run `ssh oj adm refresh-keys` to re-fetch all keys without
-   restarting SOJ (also updates the cache).
+5. Admins can run `ssh oj adm refresh-keys` to re-fetch keys for known cached
+   users and any legacy `Auth.GitHubUsers` entries without restarting SOJ.
 
 **Requirements:**
 
@@ -372,7 +362,7 @@ accepts any key (open mode) with a warning.
 | `AllowedSSHPubkey` | Single SSH pubkey allowed in; empty = accept any. Legacy; prefer `Auth` |
 | `Auth.Mode` | Authentication mode: `single`, `github-list`, or empty (auto-detect) |
 | `Auth.AllowedSSHPubkey` | Same as top-level `AllowedSSHPubkey` when `Auth.Mode=single` |
-| `Auth.GitHubUsers` | List of GitHub usernames whose SSH keys are fetched at startup (`github-list` mode) |
+| `Auth.GitHubUsers` | Legacy optional seed list for `adm refresh-keys`; not an allowlist |
 | `Auth.GitHubToken` | Optional GitHub personal access token to raise rate limits (60→5000 req/hr) |
 | `Auth.GitHubEndpoint` | GitHub base URL (default `https://github.com`); set for GitHub Enterprise |
 | `Auth.KeyCachePath` | Path to SSH key cache file (default `./keys_cache.json`). Keys are cached for 24h to avoid GitHub fetches on restart |

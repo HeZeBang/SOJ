@@ -137,12 +137,9 @@ APIAddr:    "0.0.0.0:8080"
 # 模式一：单公钥（原版行为）
 # AllowedSSHPubkey: "ssh-ed25519 AAAA... user@host"
 #
-# 模式二：GitHub 用户名列表 — 从 github.com/<user>.keys 拉取每个用户的公钥
+# 模式二：GitHub 密钥 — SSH 用户名必须匹配对应 GitHub 账户密钥
 # Auth:
 #   Mode: github-list
-#   GitHubUsers:
-#     - "alice"
-#     - "bob"
 #   GitHubToken: "ghp_xxx"                   # 可选，避免 rate limit
 #   GitHubEndpoint: "https://github.com"     # 可选，用于 GitHub Enterprise
 #   KeyCachePath: "./keys_cache.json"        # 可选，密钥缓存文件路径（默认 ./keys_cache.json）
@@ -267,17 +264,13 @@ AllowedSSHPubkey: "ssh-ed25519 AAAA... user@host"
 
 适用于单用户场景或测试。**无法防止用户名伪造** — 任何持有匹配密钥的客户端可以冒充任意用户名。
 
-### 模式二：GitHub 用户名列表 (`Auth.Mode: github-list`)
+### 模式二：GitHub 密钥 (`Auth.Mode: github-list`)
 
-SOJ 在启动时从 `https://github.com/<username>.keys` 拉取每个用户的公钥。SSH 用户名**必须与 GitHub 用户名一致** — 客户端提供的密钥在拉取的集合中查找，拥有该密钥的 GitHub 用户名必须等于 `ctx.User()`。
+SOJ 会按正在登录的 SSH 用户名，从 `https://github.com/<username>.keys` 拉取该 GitHub 账户的公钥。SSH 用户名**必须与 GitHub 用户名一致**，且客户端提供的 SSH 密钥必须属于这个 GitHub 账户。
 
 ```yaml
 Auth:
   Mode: github-list
-  GitHubUsers:
-    - "alice"
-    - "bob"
-    - "charlie"
   GitHubToken: "ghp_xxx"                   # 可选；避免 60 请求/小时的 rate limit
   GitHubEndpoint: "https://github.com"     # 可选；用于 GitHub Enterprise
 ```
@@ -285,10 +278,10 @@ Auth:
 **工作原理：**
 
 1. 启动时，SOJ 检查缓存文件（默认 `./keys_cache.json`，可通过 `Auth.KeyCachePath` 配置）。如果缓存存在且未超过 24 小时，直接从磁盘加载密钥，不请求 GitHub。
-2. 如果缓存不存在或已过期，SOJ 并发拉取所有列出用户的密钥（带进度条）。拉取失败会记录错误日志但**不会**阻止 SOJ 启动 — 失败的用户在密钥加载前无法登录。
+2. 如果客户端密钥不在缓存中，SOJ 会在 SSH 认证时为 `ctx.User()` 拉取 GitHub 密钥并更新缓存。
 3. 每个密钥通过 SHA256 指纹映射到其 GitHub 用户名。
 4. SSH 连接时，查找客户端密钥的指纹。如果找到且拥有用户名与 `ctx.User()` 匹配，则认证成功。
-5. 管理员可运行 `ssh oj adm refresh-keys` 重新拉取所有密钥，无需重启 SOJ（同时更新缓存）。
+5. 管理员可运行 `ssh oj adm refresh-keys` 重新拉取已知缓存用户和旧版 `Auth.GitHubUsers` 种子用户的密钥，无需重启 SOJ。
 
 **要求：**
 
@@ -311,7 +304,7 @@ Auth:
 | `AllowedSSHPubkey` | 允许登录的 SSH 公钥；留空 = 接受任意密钥。旧版字段，推荐使用 `Auth` |
 | `Auth.Mode` | 认证模式：`single`、`github-list` 或留空（自动推断） |
 | `Auth.AllowedSSHPubkey` | `Auth.Mode=single` 时使用，等价于顶层 `AllowedSSHPubkey` |
-| `Auth.GitHubUsers` | GitHub 用户名列表，启动时拉取其 SSH 公钥（`github-list` 模式） |
+| `Auth.GitHubUsers` | 旧版可选种子列表，供 `adm refresh-keys` 使用；不再作为白名单 |
 | `Auth.GitHubToken` | 可选的 GitHub 个人访问令牌，提升 rate limit（60→5000 请求/小时） |
 | `Auth.GitHubEndpoint` | GitHub 基础 URL（默认 `https://github.com`）；用于 GitHub Enterprise |
 | `Auth.KeyCachePath` | SSH 密钥缓存文件路径（默认 `./keys_cache.json`）。缓存 24 小时有效，避免重启时重复请求 GitHub |

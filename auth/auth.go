@@ -40,6 +40,30 @@ type keyCache struct {
 
 const cacheMaxAge = 24 * time.Hour
 
+func hasGitHubConfig(cfg types.AuthConfig) bool {
+	return len(cfg.GitHubUsers) > 0 ||
+		cfg.GitHubToken != "" ||
+		cfg.GitHubEndpoint != "" ||
+		cfg.KeyCachePath != ""
+}
+
+func isValidGitHubUsername(username string) bool {
+	if len(username) == 0 || len(username) > 39 {
+		return false
+	}
+	if username[0] == '-' || username[len(username)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(username); i++ {
+		c := username[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (m *AuthManager) cachePath() string {
 	if m.cfg.KeyCachePath != "" {
 		return m.cfg.KeyCachePath
@@ -101,7 +125,7 @@ func NewAuthManager(cfg types.AuthConfig, legacyPubkey string) (*AuthManager, er
 		if legacyPubkey != "" {
 			cfg.Mode = "single"
 			cfg.AllowedSSHPubkey = legacyPubkey
-		} else if len(cfg.GitHubUsers) > 0 {
+		} else if hasGitHubConfig(cfg) {
 			cfg.Mode = "github-list"
 		} else {
 			cfg.Mode = "open"
@@ -144,7 +168,7 @@ func (m *AuthManager) loadKeys() error {
 		log.Warn().Msg("auth: open mode, accepting any public key")
 		return nil
 	default:
-		return fmt.Errorf("unknown auth mode: %q (valid: single, github-list)", m.cfg.Mode)
+		return fmt.Errorf("unknown auth mode: %q (valid: single, github-list, open)", m.cfg.Mode)
 	}
 }
 
@@ -169,10 +193,6 @@ func (m *AuthManager) loadSingle() error {
 }
 
 func (m *AuthManager) loadGitHubList() error {
-	if len(m.cfg.GitHubUsers) == 0 {
-		return fmt.Errorf("github-list mode requires at least one GitHubUsers entry")
-	}
-
 	// 懒加载模式：仅从缓存加载，不触发网络请求
 	if cached, ok := m.loadCache(); ok {
 		m.mu.Lock()
@@ -187,14 +207,9 @@ func (m *AuthManager) loadGitHubList() error {
 
 // fetchUserKeys 懒加载：从 GitHub 拉取单个用户的公钥并写入 keyToUser
 func (m *AuthManager) fetchUserKeys(username string) {
-	allowed := false
-	for _, u := range m.cfg.GitHubUsers {
-		if u == username {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
+	username = strings.TrimSpace(username)
+	if !isValidGitHubUsername(username) {
+		log.Warn().Str("user", username).Msg("auth: invalid GitHub username")
 		return
 	}
 
@@ -273,21 +288,45 @@ func (m *AuthManager) PublicKeyHandler() ssh.PublicKeyHandler {
 	}
 }
 
-// Refresh 重新从 GitHub 拉取所有密钥（仅 github-list 模式有效）
+// Refresh 重新从 GitHub 拉取已知用户的密钥（仅 github-list 模式有效）
 func (m *AuthManager) Refresh() error {
 	if m.cfg.Mode != "github-list" {
 		return fmt.Errorf("refresh only available in github-list mode (current: %s)", m.cfg.Mode)
 	}
 
+	userSet := make(map[string]struct{})
+	for _, username := range m.cfg.GitHubUsers {
+		username = strings.TrimSpace(username)
+		if username != "" {
+			userSet[username] = struct{}{}
+		}
+	}
+
+	m.mu.RLock()
+	for _, username := range m.keyToUser {
+		if username != "*" && username != "" {
+			userSet[username] = struct{}{}
+		}
+	}
+	m.mu.RUnlock()
+
+	usernames := make([]string, 0, len(userSet))
+	for username := range userSet {
+		usernames = append(usernames, username)
+	}
+	if len(usernames) == 0 {
+		return fmt.Errorf("no known GitHub users to refresh; users are fetched on first login")
+	}
+
 	log.Info().
 		Str("endpoint", m.endpoint).
-		Int("users", len(m.cfg.GitHubUsers)).
+		Int("users", len(usernames)).
 		Msg("auth: refreshing SSH keys from GitHub...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(len(m.cfg.GitHubUsers))*10*time.Second+30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(len(usernames))*10*time.Second+30*time.Second)
 	defer cancel()
 
-	result := FetchAllKeysForUsers(ctx, m.endpoint, m.cfg.GitHubToken, m.cfg.GitHubUsers)
+	result := FetchAllKeysForUsers(ctx, m.endpoint, m.cfg.GitHubToken, usernames)
 
 	newMap := make(map[string]string)
 	totalKeys := 0
