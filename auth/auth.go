@@ -29,6 +29,8 @@ type AuthManager struct {
 
 	mu        sync.RWMutex
 	keyToUser map[string]string // fingerprint → username
+
+	cacheMu sync.Mutex // 保护 saveCache 文件写入
 }
 
 type keyCache struct {
@@ -72,6 +74,9 @@ func (m *AuthManager) loadCache() (map[string]string, bool) {
 }
 
 func (m *AuthManager) saveCache(keys map[string]string) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+
 	cache := keyCache{
 		UpdatedAt: time.Now(),
 		Keys:      keys,
@@ -168,7 +173,7 @@ func (m *AuthManager) loadGitHubList() error {
 		return fmt.Errorf("github-list mode requires at least one GitHubUsers entry")
 	}
 
-	// Try loading from cache first
+	// 懒加载模式：仅从缓存加载，不触发网络请求
 	if cached, ok := m.loadCache(); ok {
 		m.mu.Lock()
 		m.keyToUser = cached
@@ -176,56 +181,49 @@ func (m *AuthManager) loadGitHubList() error {
 		return nil
 	}
 
-	log.Info().
-		Str("endpoint", m.endpoint).
-		Int("users", len(m.cfg.GitHubUsers)).
-		Msg("auth: fetching SSH keys from GitHub...")
+	log.Info().Msg("auth: no key cache found, keys will be fetched on first login")
+	return nil
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(len(m.cfg.GitHubUsers))*10*time.Second+30*time.Second)
+// fetchUserKeys 懒加载：从 GitHub 拉取单个用户的公钥并写入 keyToUser
+func (m *AuthManager) fetchUserKeys(username string) {
+	allowed := false
+	for _, u := range m.cfg.GitHubUsers {
+		if u == username {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result := FetchAllKeysForUsers(ctx, m.endpoint, m.cfg.GitHubToken, m.cfg.GitHubUsers)
+	keys, err := FetchGitHubKeys(ctx, m.endpoint, username, m.cfg.GitHubToken)
+	if err != nil {
+		log.Warn().Str("user", username).Err(err).Msg("auth: lazy fetch failed")
+		return
+	}
+	if len(keys) == 0 {
+		log.Warn().Str("user", username).Msg("auth: lazy fetch returned no keys")
+		return
+	}
 
-	// 写入密钥映射
 	m.mu.Lock()
-	totalKeys := 0
-	newMap := make(map[string]string)
-	for username, userKeys := range result.Keys {
-		for _, pk := range userKeys {
-			fp := fingerprint(pk)
-			newMap[fp] = username
-			m.keyToUser[fp] = username
-			totalKeys++
-		}
+	for _, pk := range keys {
+		fp := fingerprint(pk)
+		m.keyToUser[fp] = username
+	}
+	snapshot := make(map[string]string, len(m.keyToUser))
+	for k, v := range m.keyToUser {
+		snapshot[k] = v
 	}
 	m.mu.Unlock()
 
-	// Save to cache
-	if totalKeys > 0 {
-		m.saveCache(newMap)
-	}
-
-	// 打印汇总
-	log.Info().
-		Str("mode", "github-list").
-		Int("total_users", result.TotalUsers).
-		Int("loaded", result.LoadedUsers).
-		Int("keys", totalKeys).
-		Msg("auth: key loading complete")
-
-	if len(result.FailedUsers) > 0 {
-		log.Warn().
-			Strs("users", result.FailedUsers).
-			Int("count", len(result.FailedUsers)).
-			Msg("auth: some users failed to load (they will not be able to login)")
-	}
-
-	// 非致命：即使全部失败也继续运行，仅警告
-	if totalKeys == 0 {
-		log.Error().Msg("auth: WARNING - no SSH keys loaded, nobody will be able to login until keys are refreshed")
-	}
-
-	return nil
+	m.saveCache(snapshot)
+	log.Info().Str("user", username).Int("keys", len(keys)).Msg("auth: lazy fetched keys")
 }
 
 // PublicKeyHandler 返回用于 SSH 服务器的公钥认证处理函数
@@ -240,6 +238,13 @@ func (m *AuthManager) PublicKeyHandler() ssh.PublicKeyHandler {
 		m.mu.RLock()
 		mapped, ok := m.keyToUser[fp]
 		m.mu.RUnlock()
+
+		if !ok && m.cfg.Mode == "github-list" {
+			m.fetchUserKeys(ctx.User())
+			m.mu.RLock()
+			mapped, ok = m.keyToUser[fp]
+			m.mu.RUnlock()
+		}
 
 		if !ok {
 			log.Debug().
