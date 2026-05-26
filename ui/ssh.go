@@ -11,6 +11,7 @@ import (
 	ssh "github.com/gliderlabs/ssh"
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/mrhaoxx/SOJ/auth"
+	"github.com/mrhaoxx/SOJ/deploy"
 	"github.com/mrhaoxx/SOJ/types"
 )
 
@@ -423,6 +424,22 @@ func (sh *SSHHandler) handleAdmin(s ssh.Session, uf types.Userface, cmds []strin
 	case "reload":
 		// 这个功能需要在main.go中实现
 		uf.Println("Reload functionality will be implemented in main.go")
+	case "rejudge":
+		if len(cmds) > 3 {
+			uf.Println(aurora.Red("error:"), "invalid arguments")
+			uf.Println("usage: adm rejudge [problem_id]")
+			return
+		}
+		opts := deploy.RejudgeOptions{
+			Input:  s,
+			Output: uf,
+		}
+		if len(cmds) == 3 {
+			opts.ProblemId = cmds[2]
+		}
+		if err := deploy.Rejudge(sh.cfg, opts); err != nil {
+			uf.Println(aurora.Red("error:"), err)
+		}
 	case "refresh-keys":
 		if sh.authMgr == nil {
 			uf.Println(aurora.Red("error:"), "auth manager not available")

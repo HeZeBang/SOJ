@@ -1,6 +1,9 @@
 package types
 
 import (
+	"math"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,7 +90,9 @@ func applyRankUpdate(u *User, problem *Problem, s *SubmitCtx) {
 		// 影响最终结果。等号让同一次提交多次扫描时也能稳定写入（幂等）。
 		shouldUpdate = u.BestSubmitDate[problemID] <= s.SubmitTime
 	default: // "", "best", 或任何无法识别的值
-		shouldUpdate = u.BestScores[problemID] < newScore
+		oldScore, hasOldScore := u.BestScores[problemID]
+		shouldUpdate = !hasOldScore || oldScore < newScore ||
+			(oldScore == newScore && speedupTagGreater(s.JudgeResult.Tag, u.BestTags[problemID]))
 	}
 	if !shouldUpdate {
 		return
@@ -153,7 +158,45 @@ func (ds *DatabaseService) UpdateUser(user *User) error {
 func (ds *DatabaseService) GetAllUsersOrderedByScore() ([]User, error) {
 	var users []User
 	result := ds.db.Order("total_score desc").Find(&users)
+	sort.SliceStable(users, func(i, j int) bool {
+		if users[i].TotalScore != users[j].TotalScore {
+			return users[i].TotalScore > users[j].TotalScore
+		}
+		return userSpeedupScore(users[i]) > userSpeedupScore(users[j])
+	})
 	return users, result.Error
+}
+
+func parseSpeedupTag(tag string) (float64, bool) {
+	tag = strings.TrimSpace(tag)
+	if len(tag) < 2 || !strings.EqualFold(tag[len(tag)-1:], "x") {
+		return 0, false
+	}
+
+	value, err := strconv.ParseFloat(strings.TrimSpace(tag[:len(tag)-1]), 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, false
+	}
+	return value, true
+}
+
+func speedupTagGreater(candidate, current string) bool {
+	candidateValue, candidateOK := parseSpeedupTag(candidate)
+	if !candidateOK {
+		return false
+	}
+	currentValue, currentOK := parseSpeedupTag(current)
+	return !currentOK || candidateValue > currentValue
+}
+
+func userSpeedupScore(user User) float64 {
+	var score float64
+	for _, tag := range user.BestTags {
+		if value, ok := parseSpeedupTag(tag); ok {
+			score += value
+		}
+	}
+	return score
 }
 
 // UpdateUserSubmitResult 更新用户提交结果

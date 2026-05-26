@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"sort"
@@ -20,6 +21,8 @@ import (
 type RejudgeOptions struct {
 	ProblemId string // empty = all problems
 	AutoYes   bool   // skip the confirmation prompt
+	Input     io.Reader
+	Output    io.Writer
 }
 
 // Rejudge re-runs the evaluator on the latest submission per (user, problem)
@@ -27,6 +30,15 @@ type RejudgeOptions struct {
 // is overwritten with the freshly judged value × current weight (not max-merged),
 // so weight or judge.sh changes take full effect.
 func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
+	input := opts.Input
+	if input == nil {
+		input = os.Stdin
+	}
+	output := opts.Output
+	if output == nil {
+		output = os.Stdout
+	}
+
 	dbService, err := types.NewDatabaseService(cfg)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
@@ -70,7 +82,7 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 	}
 
 	if len(targets) == 0 {
-		fmt.Println("No submissions to rejudge.")
+		fmt.Fprintln(output, "No submissions to rejudge.")
 		return nil
 	}
 
@@ -85,19 +97,19 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 	if opts.ProblemId != "" {
 		scope = "problem " + opts.ProblemId
 	}
-	fmt.Printf("About to rejudge %d submission(s) for %s:\n", len(targets), scope)
+	fmt.Fprintf(output, "About to rejudge %d submission(s) for %s:\n", len(targets), scope)
 	for _, s := range targets {
-		fmt.Printf("  - %s / %s   (latest submit %s, %s)\n",
+		fmt.Fprintf(output, "  - %s / %s   (latest submit %s, %s)\n",
 			s.User, s.Problem, s.ID, time.Unix(0, s.SubmitTime).Format(time.DateTime))
 	}
 
 	if !opts.AutoYes {
-		fmt.Print("Continue? [y/N] ")
-		reader := bufio.NewReader(os.Stdin)
+		fmt.Fprint(output, "Continue? [y/N] ")
+		reader := bufio.NewReader(input)
 		line, _ := reader.ReadString('\n')
 		ans := strings.TrimSpace(strings.ToLower(line))
 		if ans != "y" && ans != "yes" {
-			fmt.Println("Aborted.")
+			fmt.Fprintln(output, "Aborted.")
 			return nil
 		}
 	}
@@ -124,19 +136,19 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 
 			Userface: types.Userface{
 				Buffer: bytes.NewBuffer(nil),
-				Writer: os.Stdout,
+				Writer: output,
 			},
 			Running: make(chan struct{}),
 		}
 
-		fmt.Printf("\n=== Rejudging %s / %s (new submit %s) ===\n", old.User, old.Problem, id)
+		fmt.Fprintf(output, "\n=== Rejudging %s / %s (new submit %s) ===\n", old.User, old.Problem, id)
 		go evaluator.RunJudge(&ctx, &pb)
 		<-ctx.Running
 
 		// Overwrite BestScore unconditionally — this is the whole point of rejudge.
 		user, err := dbService.GetUserByID(old.User)
 		if err != nil {
-			fmt.Printf("  ! failed to load user %s: %v\n", old.User, err)
+			fmt.Fprintf(output, "  ! failed to load user %s: %v\n", old.User, err)
 			failCnt++
 			continue
 		}
@@ -154,14 +166,14 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 			delete(user.BestSubmitDate, old.Problem)
 			delete(user.BestTags, old.Problem)
 			failCnt++
-			fmt.Printf("  ! rejudge did not pass — cleared %s's score for %s\n", old.User, old.Problem)
+			fmt.Fprintf(output, "  ! rejudge did not pass - cleared %s's score for %s\n", old.User, old.Problem)
 		}
 		if err := dbService.UpdateUser(user); err != nil {
-			fmt.Printf("  ! failed to save user %s: %v\n", old.User, err)
+			fmt.Fprintf(output, "  ! failed to save user %s: %v\n", old.User, err)
 			failCnt++
 		}
 	}
 
-	fmt.Printf("\nRejudge complete: %d passed, %d failed/cleared.\n", okCnt, failCnt)
+	fmt.Fprintf(output, "\nRejudge complete: %d passed, %d failed/cleared.\n", okCnt, failCnt)
 	return nil
 }
