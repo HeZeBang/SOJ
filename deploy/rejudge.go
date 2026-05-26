@@ -121,6 +121,21 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 	for _, old := range targets {
 		pb := problems[old.Problem]
 
+		fmt.Fprintf(output, "\n=== Rejudging %s / %s ===\n", old.User, old.Problem)
+
+		// Invalidate every prior submit for this (user, problem) BEFORE the
+		// new evaluation — historical rows stay in the DB for audit but no
+		// longer participate in rank calculations. The new submit below is
+		// born with Invalid=false (zero value), so it becomes the only
+		// valid one and RecomputeUserProblemBest picks it up.
+		if n, err := dbService.MarkSubmitsInvalidByUserProblem(old.User, old.Problem); err != nil {
+			fmt.Fprintf(output, "  ! failed to invalidate prior submits for %s/%s: %v\n", old.User, old.Problem, err)
+			failCnt++
+			continue
+		} else if n > 0 {
+			fmt.Fprintf(output, "  invalidated %d prior submission(s)\n", n)
+		}
+
 		subtime := time.Now()
 		id := strconv.Itoa(int(subtime.UnixNano()))
 		ctx := types.SubmitCtx{
@@ -141,36 +156,22 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 			Running: make(chan struct{}),
 		}
 
-		fmt.Fprintf(output, "\n=== Rejudging %s / %s (new submit %s) ===\n", old.User, old.Problem, id)
+		fmt.Fprintf(output, "  new submit id %s\n", id)
 		go evaluator.RunJudge(&ctx, &pb)
 		<-ctx.Running
 
-		// Overwrite BestScore unconditionally — this is the whole point of rejudge.
-		user, err := dbService.GetUserByID(old.User)
-		if err != nil {
-			fmt.Fprintf(output, "  ! failed to load user %s: %v\n", old.User, err)
-			failCnt++
-			continue
-		}
 		if ctx.Status == "completed" && ctx.JudgeResult.Success {
-			user.BestScores[old.Problem] = ctx.JudgeResult.Score * pb.Weight
-			user.BestSubmits[old.Problem] = ctx.ID
-			user.BestSubmitDate[old.Problem] = ctx.SubmitTime
-			user.BestTags[old.Problem] = ctx.JudgeResult.Tag
 			okCnt++
 		} else {
-			// Rejudge didn't yield a passing result; clear the entry so the
-			// rank reflects current reality instead of a stale pass.
-			delete(user.BestScores, old.Problem)
-			delete(user.BestSubmits, old.Problem)
-			delete(user.BestSubmitDate, old.Problem)
-			delete(user.BestTags, old.Problem)
 			failCnt++
-			fmt.Fprintf(output, "  ! rejudge did not pass - cleared %s's score for %s\n", old.User, old.Problem)
+			fmt.Fprintf(output, "  ! rejudge did not pass - %s/%s now has no valid passing submit\n", old.User, old.Problem)
 		}
-		if err := dbService.UpdateUser(user); err != nil {
-			fmt.Fprintf(output, "  ! failed to save user %s: %v\n", old.User, err)
-			failCnt++
+
+		// Rebuild Best* from the (now small) set of valid submits for this
+		// (user, problem). Handles both rankupdate=best (picks current max)
+		// and rankupdate=always (picks latest valid) uniformly.
+		if err := dbService.RecomputeUserProblemBest(old.User, old.Problem, &pb); err != nil {
+			fmt.Fprintf(output, "  ! failed to recompute Best* for %s/%s: %v\n", old.User, old.Problem, err)
 		}
 	}
 

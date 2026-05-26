@@ -97,6 +97,98 @@ func TestApplyRankUpdateUsesSpeedupTagAsBestTieBreaker(t *testing.T) {
 	}
 }
 
+func TestApplyRankUpdateSkipsInvalid(t *testing.T) {
+	user := User{
+		ID:             "alice",
+		BestScores:     make(JMapStrFloat64),
+		BestSubmits:    make(JMapStrString),
+		BestSubmitDate: make(JMapStrInt64),
+		BestTags:       make(JMapStrString),
+	}
+	problem := Problem{Id: "p1", Weight: 1}
+
+	applyRankUpdate(&user, &problem, &SubmitCtx{
+		ID:         "s1",
+		Problem:    "p1",
+		Status:     "completed",
+		SubmitTime: 1,
+		Invalid:    true,
+		JudgeResult: JudgeResult{Success: true, Score: 100},
+	})
+
+	if _, ok := user.BestScores["p1"]; ok {
+		t.Fatalf("Invalid submit must not produce a Best* entry, got %v", user.BestScores)
+	}
+}
+
+func TestRecomputeUserProblemBestFallsBackToSecondBest(t *testing.T) {
+	ds := newTestDatabaseService(t)
+	user, err := ds.CreateUser("alice")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	pb := Problem{Id: "p1", Weight: 1}
+
+	high := SubmitCtx{
+		ID:          "high",
+		User:        user.ID,
+		Problem:     "p1",
+		Status:      "completed",
+		SubmitTime:  100,
+		JudgeResult: JudgeResult{Success: true, Score: 80},
+	}
+	low := SubmitCtx{
+		ID:          "low",
+		User:        user.ID,
+		Problem:     "p1",
+		Status:      "completed",
+		SubmitTime:  200,
+		JudgeResult: JudgeResult{Success: true, Score: 60},
+	}
+	if err := ds.db.Create(&high).Error; err != nil {
+		t.Fatalf("create high: %v", err)
+	}
+	if err := ds.db.Create(&low).Error; err != nil {
+		t.Fatalf("create low: %v", err)
+	}
+
+	// Initial recompute should pick "high" (rankupdate=best default, 80 > 60).
+	if err := ds.RecomputeUserProblemBest(user.ID, "p1", &pb); err != nil {
+		t.Fatalf("recompute: %v", err)
+	}
+	u, _ := ds.GetUserByID(user.ID)
+	if u.BestSubmits["p1"] != "high" || u.BestScores["p1"] != 80 {
+		t.Fatalf("expected best=high/80, got submit=%q score=%v", u.BestSubmits["p1"], u.BestScores["p1"])
+	}
+
+	// Invalidate "high"; recompute should fall back to "low".
+	if _, err := ds.MarkSubmitInvalid("high", true); err != nil {
+		t.Fatalf("mark invalid: %v", err)
+	}
+	if err := ds.RecomputeUserProblemBest(user.ID, "p1", &pb); err != nil {
+		t.Fatalf("recompute after invalidate: %v", err)
+	}
+	u, _ = ds.GetUserByID(user.ID)
+	if u.BestSubmits["p1"] != "low" || u.BestScores["p1"] != 60 {
+		t.Fatalf("expected best=low/60 after invalidating high, got submit=%q score=%v", u.BestSubmits["p1"], u.BestScores["p1"])
+	}
+
+	// Invalidate "low" too; recompute should clear the entry.
+	if _, err := ds.MarkSubmitInvalid("low", true); err != nil {
+		t.Fatalf("mark invalid low: %v", err)
+	}
+	if err := ds.RecomputeUserProblemBest(user.ID, "p1", &pb); err != nil {
+		t.Fatalf("recompute after invalidate all: %v", err)
+	}
+	u, _ = ds.GetUserByID(user.ID)
+	if _, ok := u.BestScores["p1"]; ok {
+		t.Fatalf("expected Best* cleared after all invalid, got %v", u.BestScores)
+	}
+	if u.TotalScore != 0 {
+		t.Fatalf("expected total=0, got %v", u.TotalScore)
+	}
+}
+
 func TestGetAllUsersOrderedByScoreUsesSpeedupTagTieBreaker(t *testing.T) {
 	db := newTestDatabaseService(t)
 	users := []User{

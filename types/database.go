@@ -77,6 +77,9 @@ func (ds *DatabaseService) CreateUser(userID string) (*User, error) {
 // not-yet-completed submits never write. The caller must have called
 // ensureMaps(u) first.
 func applyRankUpdate(u *User, problem *Problem, s *SubmitCtx) {
+	if s.Invalid {
+		return
+	}
 	if s.Status != "completed" || !s.JudgeResult.Success {
 		return
 	}
@@ -221,6 +224,16 @@ func (ds *DatabaseService) DoFullUserScan(problems map[string]Problem) error {
 	userMap := make(map[string]User)
 	for _, user := range users {
 		ensureMaps(&user)
+		// 清掉当前 problems 集合里每条 problem 的 Best* 条目，让扫描从零重建。
+		// 这样 Invalid 化某条 submit 后，best 规则能正确回退到次佳，
+		// always 规则在全部失效时能正确清空。不动 problems 之外的条目，
+		// 避免误伤已删除题目残留的历史排名。
+		for problemID := range problems {
+			delete(user.BestScores, problemID)
+			delete(user.BestSubmits, problemID)
+			delete(user.BestSubmitDate, problemID)
+			delete(user.BestTags, problemID)
+		}
 		userMap[user.ID] = user
 	}
 
@@ -357,7 +370,7 @@ func (ds *DatabaseService) GetSubmitsForAPI(page, limit int) ([]SubmitCtx, int64
 	ds.db.Model(&SubmitCtx{}).Count(&total)
 
 	// 获取分页数据，只选择需要的字段
-	result := ds.db.Select("id", "user", "problem", "submit_time", "status", "msg", "judge_result").
+	result := ds.db.Select("id", "user", "problem", "submit_time", "status", "msg", "judge_result", "invalid").
 		Order("submit_time desc").
 		Offset((page - 1) * limit).
 		Limit(limit).
@@ -423,4 +436,61 @@ func (ds *DatabaseService) GetSubmitStatistics() (map[string]interface{}, error)
 	stats["total_users"] = totalUsers
 
 	return stats, nil
+}
+
+// MarkSubmitInvalid sets the Invalid flag on a single submit record. Returns
+// the updated record so callers can locate (user, problem) for a follow-up
+// RecomputeUserProblemBest.
+func (ds *DatabaseService) MarkSubmitInvalid(submitID string, invalid bool) (*SubmitCtx, error) {
+	submit, err := ds.GetSubmitByID(submitID)
+	if err != nil {
+		return nil, err
+	}
+	submit.Invalid = invalid
+	submit.LastUpdate = time.Now().UnixNano()
+	if err := ds.db.Save(submit).Error; err != nil {
+		return nil, err
+	}
+	return submit, nil
+}
+
+// MarkSubmitsInvalidByUserProblem flips Invalid=true on every non-invalid
+// submit for the given (user, problem). Returns rows affected. Used by Rejudge
+// before re-evaluating: previous submissions for that (user, problem) become
+// historical-only and stop participating in rank calculations.
+func (ds *DatabaseService) MarkSubmitsInvalidByUserProblem(userID, problemID string) (int64, error) {
+	result := ds.db.Model(&SubmitCtx{}).
+		Where("user = ? AND problem = ? AND invalid = ?", userID, problemID, false).
+		Updates(map[string]interface{}{
+			"invalid":     true,
+			"last_update": time.Now().UnixNano(),
+		})
+	return result.RowsAffected, result.Error
+}
+
+// RecomputeUserProblemBest rebuilds the user's Best* entry for one problem
+// by scanning all of their submits for that problem and replaying
+// applyRankUpdate. applyRankUpdate skips Invalid submits, so the resulting
+// Best* reflects only currently-valid submissions — picking up "second best"
+// under the best rule and clearing the entry when no valid passing submit
+// remains.
+func (ds *DatabaseService) RecomputeUserProblemBest(userID, problemID string, problem *Problem) error {
+	user, err := ds.GetUserByID(userID)
+	if err != nil {
+		return err
+	}
+	ensureMaps(user)
+	delete(user.BestScores, problemID)
+	delete(user.BestSubmits, problemID)
+	delete(user.BestSubmitDate, problemID)
+	delete(user.BestTags, problemID)
+
+	var submits []SubmitCtx
+	if err := ds.db.Where("user = ? AND problem = ?", userID, problemID).Find(&submits).Error; err != nil {
+		return err
+	}
+	for i := range submits {
+		applyRankUpdate(user, problem, &submits[i])
+	}
+	return ds.UpdateUser(user)
 }

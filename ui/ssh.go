@@ -440,6 +440,27 @@ func (sh *SSHHandler) handleAdmin(s ssh.Session, uf types.Userface, cmds []strin
 		if err := deploy.Rejudge(sh.cfg, opts); err != nil {
 			uf.Println(aurora.Red("error:"), err)
 		}
+	case "invalid", "valid":
+		if len(cmds) != 3 {
+			uf.Println(aurora.Red("error:"), "usage: adm", cmds[1], "<submit_id>")
+			return
+		}
+		invalid := cmds[1] == "invalid"
+		sub, err := sh.dbService.MarkSubmitInvalid(cmds[2], invalid)
+		if err != nil {
+			uf.Println(aurora.Red("error:"), "submit", aurora.Yellow(strconv.Quote(cmds[2])), "not found or save failed:", err)
+			return
+		}
+		pb, ok := sh.problems[sub.Problem]
+		if !ok {
+			uf.Println(aurora.Yellow("warn:"), "submit marked", cmds[1], "but problem", aurora.Bold(sub.Problem), "no longer exists; Best* not recomputed")
+			return
+		}
+		if err := sh.dbService.RecomputeUserProblemBest(sub.User, sub.Problem, &pb); err != nil {
+			uf.Println(aurora.Red("error:"), "marked", cmds[1], "but recompute failed:", err)
+			return
+		}
+		uf.Println(aurora.Green("ok:"), "submit", aurora.Bold(cmds[2]), "marked", aurora.Magenta(cmds[1]), "- Best* recomputed for", aurora.Cyan(sub.User), "/", aurora.Cyan(sub.Problem))
 	case "refresh-keys":
 		if sh.authMgr == nil {
 			uf.Println(aurora.Red("error:"), "auth manager not available")
@@ -465,6 +486,13 @@ func (sh *SSHHandler) listSubs(uf types.Userface, submits []types.SubmitCtx) {
 			ColLongest[i] = len(col)
 		}
 
+		statusOf := func(s types.SubmitCtx) string {
+			if s.Invalid {
+				return s.Status + " [invalid]"
+			}
+			return s.Status
+		}
+
 		for _, submit := range submits {
 			scoreStr := fmt.Sprintf("%.2f", submit.JudgeResult.Score)
 			if submit.JudgeResult.Tag != "" {
@@ -473,7 +501,7 @@ func (sh *SSHHandler) listSubs(uf types.Userface, submits []types.SubmitCtx) {
 			ColLongest[0] = max(ColLongest[0], len(submit.ID))
 			ColLongest[1] = max(ColLongest[1], len(submit.User))
 			ColLongest[2] = max(ColLongest[2], len(submit.Problem))
-			ColLongest[3] = max(ColLongest[3], len(submit.Status))
+			ColLongest[3] = max(ColLongest[3], len(statusOf(submit)))
 			ColLongest[4] = max(ColLongest[4], len(submit.Msg))
 			ColLongest[5] = max(ColLongest[5], len(scoreStr))
 			ColLongest[6] = max(ColLongest[6], len(sh.omitStr(submit.JudgeResult.Msg, 20)))
@@ -490,11 +518,15 @@ func (sh *SSHHandler) listSubs(uf types.Userface, submits []types.SubmitCtx) {
 			if submit.JudgeResult.Tag != "" {
 				scoreStr = fmt.Sprintf("%s %s", scoreStr, aurora.Italic(aurora.Gray(15, fmt.Sprintf("(%s)", submit.JudgeResult.Tag))))
 			}
+			statusCol := fmt.Sprint(types.ColorizeStatus(submit.Status))
+			if submit.Invalid {
+				statusCol = fmt.Sprint(statusCol, " ", aurora.Gray(15, "[invalid]"))
+			}
 			uf.Printf("%-*s %-*s %-*s %-*s %-*s %-*s %-*s %-*s\n",
 				ColLongest[0], aurora.Magenta(submit.ID),
 				ColLongest[1], aurora.Blue(submit.User),
 				ColLongest[2], aurora.Bold(submit.Problem),
-				ColLongest[3], types.ColorizeStatus(submit.Status),
+				ColLongest[3], statusCol,
 				ColLongest[4], aurora.Gray(15, submit.Msg),
 				ColLongest[5], aurora.Bold(scoreStr),
 				ColLongest[6], aurora.Gray(15, sh.omitStr(submit.JudgeResult.Msg, 20)),
@@ -508,7 +540,11 @@ func (sh *SSHHandler) showSub(uf types.Userface, submit types.SubmitCtx) {
 	uf.Println("Submit ID:", aurora.Magenta(submit.ID))
 	uf.Println("User:", aurora.Blue(submit.User))
 	uf.Println("Problem:", aurora.Bold(submit.Problem))
-	uf.Println("Status:", types.ColorizeStatus(submit.Status))
+	if submit.Invalid {
+		uf.Println("Status:", types.ColorizeStatus(submit.Status), aurora.Gray(15, "[invalid - excluded from rank]"))
+	} else {
+		uf.Println("Status:", types.ColorizeStatus(submit.Status))
+	}
 	if submit.Status == "queued" {
 		if ahead, err := sh.dbService.CountSubmitsAhead(submit.SubmitTime); err == nil {
 			uf.Println("Queue ahead:", aurora.Yellow(ahead))
