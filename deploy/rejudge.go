@@ -20,6 +20,7 @@ import (
 // RejudgeOptions controls Rejudge behavior.
 type RejudgeOptions struct {
 	ProblemId string // empty = all problems
+	UserId    string // empty = all users; requires ProblemId when set
 	AutoYes   bool   // skip the confirmation prompt
 	Input     io.Reader
 	Output    io.Writer
@@ -52,6 +53,9 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 			return fmt.Errorf("unknown problem %q", opts.ProblemId)
 		}
 	}
+	if opts.UserId != "" && opts.ProblemId == "" {
+		return fmt.Errorf("user filter requires a problem filter (rejudge <problem> <user>)")
+	}
 
 	// Pull every previously-evaluated submit (completed or failed; skip "dead"
 	// which never finished). Newest first so the first occurrence of each
@@ -61,6 +65,9 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 	q := db.Where("status IN ?", []string{"completed", "failed"}).Order("submit_time desc")
 	if opts.ProblemId != "" {
 		q = q.Where("problem = ?", opts.ProblemId)
+	}
+	if opts.UserId != "" {
+		q = q.Where("user = ?", opts.UserId)
 	}
 	if err := q.Find(&allSubmits).Error; err != nil {
 		return fmt.Errorf("query submits: %w", err)
@@ -96,6 +103,9 @@ func Rejudge(cfg *types.Config, opts RejudgeOptions) error {
 	scope := "all problems"
 	if opts.ProblemId != "" {
 		scope = "problem " + opts.ProblemId
+		if opts.UserId != "" {
+			scope += " (user " + opts.UserId + ")"
+		}
 	}
 	fmt.Fprintf(output, "About to rejudge %d submission(s) for %s:\n", len(targets), scope)
 	for _, s := range targets {

@@ -52,10 +52,15 @@ func main() {
 			return
 		case "rejudge":
 			opts := deploy.RejudgeOptions{}
-			if len(os.Args) == 3 {
+			switch len(os.Args) {
+			case 2:
+			case 3:
 				opts.ProblemId = os.Args[2]
-			} else if len(os.Args) != 2 {
-				fmt.Fprintln(os.Stderr, "usage: SOJ rejudge [problem_id]")
+			case 4:
+				opts.ProblemId = os.Args[2]
+				opts.UserId = os.Args[3]
+			default:
+				fmt.Fprintln(os.Stderr, "usage: SOJ rejudge [problem_id [user_id]]")
 				os.Exit(2)
 			}
 			if err := deploy.Rejudge(&cfg, opts); err != nil {

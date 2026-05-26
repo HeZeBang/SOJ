@@ -425,17 +425,20 @@ func (sh *SSHHandler) handleAdmin(s ssh.Session, uf types.Userface, cmds []strin
 		// 这个功能需要在main.go中实现
 		uf.Println("Reload functionality will be implemented in main.go")
 	case "rejudge":
-		if len(cmds) > 3 {
+		if len(cmds) > 4 {
 			uf.Println(aurora.Red("error:"), "invalid arguments")
-			uf.Println("usage: adm rejudge [problem_id]")
+			uf.Println("usage: adm rejudge [problem_id [user_id]]")
 			return
 		}
 		opts := deploy.RejudgeOptions{
 			Input:  s,
 			Output: uf,
 		}
-		if len(cmds) == 3 {
+		if len(cmds) >= 3 {
 			opts.ProblemId = cmds[2]
+		}
+		if len(cmds) == 4 {
+			opts.UserId = cmds[3]
 		}
 		if err := deploy.Rejudge(sh.cfg, opts); err != nil {
 			uf.Println(aurora.Red("error:"), err)
