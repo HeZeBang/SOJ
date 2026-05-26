@@ -30,6 +30,8 @@ func NewDatabaseService(cfg *Config) (*DatabaseService, error) {
 	db.AutoMigrate(&SubmitCtx{})
 	db.AutoMigrate(&User{})
 
+	db.Exec("UPDATE submit_ctxes SET invalid = 0 WHERE invalid IS NULL")
+
 	// queued submissions are recovered by the scheduler after startup. Any
 	// other non-terminal status belonged to a process that was interrupted.
 	db.Model(&SubmitCtx{}).

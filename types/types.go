@@ -132,7 +132,7 @@ type SubmitCtx struct {
 	Status string `json:"status"`
 	Msg    string `json:"message"`
 
-	Invalid bool `json:"invalid"`
+	Invalid bool `gorm:"default:false" json:"invalid"`
 
 	SubmitDir       string          `gorm:"-" json:"-"`
 	SubmitsHashes   SubmitsHashes   `json:"submits_hashes"`
